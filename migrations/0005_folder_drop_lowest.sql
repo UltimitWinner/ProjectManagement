@@ -1,0 +1,1 @@
+ALTER TABLE folders ADD COLUMN drop_lowest_count INTEGER NOT NULL DEFAULT 0;

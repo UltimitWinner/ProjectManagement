@@ -1,0 +1,774 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self';">
+  <meta http-equiv="X-Content-Type-Options" content="nosniff">
+  <title>MyPlan - Project & Coursework Manager</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+
+<body>
+
+  <!-- Fullscreen Mandatory Login Overlay (Forced on initial load if unauthenticated) -->
+  <div id="authGateOverlay" class="auth-gate-overlay hidden">
+    <div class="auth-gate-card">
+      <div class="auth-gate-header">
+        <svg class="brand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />
+        </svg>
+        <h2>MyPlan</h2>
+        <p class="auth-subtitle">Authentication Required to Access Projects & Data</p>
+      </div>
+
+      <p class="auth-subtitle">Sign in with your account.</p>
+
+      <form id="gateLoginForm" class="gate-login-form">
+        <div class="form-group">
+          <label for="gateUsername">Username</label>
+          <input type="text" id="gateUsername" required autocomplete="username">
+        </div>
+        <div class="form-group">
+          <label for="gatePassword">Password</label>
+          <input type="password" id="gatePassword" required autocomplete="current-password">
+        </div>
+        <div id="gateLoginError" class="auth-error-msg hidden"></div>
+        <button type="submit" class="btn-primary full-width" style="padding: 0.65rem;">Sign In</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Main Application Container -->
+  <div class="app-container">
+    <!-- Sidebar -->
+    <aside id="projectsSidebar" class="sidebar">
+      <div class="sidebar-header">
+        <div class="brand">
+          <svg class="brand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />
+          </svg>
+          <span>MyPlan</span>
+        </div>
+        <button id="btnNewProject" class="btn-icon" title="Create New Project">+</button>
+      </div>
+
+      <!-- User Profile & Switch/Logout Widget -->
+      <div class="user-profile-bar">
+        <div class="user-info-text">
+          <span class="user-display-name" id="userDisplayName">Signed Out</span>
+          <div style="display:flex; gap: 0.35rem; align-items:center;">
+            <span class="badge" id="projectAccessBadge">NO ACCESS</span>
+            <span class="user-subtext" id="userRoleSubtext"></span>
+          </div>
+        </div>
+        <button id="btnLogout" class="btn-user-switch" title="Log Out / Switch Account">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-4 h-4">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+            <polyline points="16 17 21 12 16 7" />
+            <line x1="21" y1="12" x2="9" y2="12" />
+          </svg>
+        </button>
+      </div>
+
+      <div class="sidebar-section">
+        <span class="section-title">PROJECTS / WORKFLOWS</span>
+        <ul id="projectList" class="project-list">
+          <!-- Populated by JS -->
+        </ul>
+      </div>
+
+      <div class="sidebar-footer">
+        <button id="btnManageMembers" class="btn-sidebar edit-required">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-4 h-4">
+            <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+            <circle cx="9" cy="7" r="4" />
+            <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+            <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+          </svg>
+          <span>Project Permissions</span>
+        </button>
+        <button id="btnManageFields" class="btn-sidebar edit-required">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-4 h-4">
+            <path d="M12 3v18M3 12h18" />
+          </svg>
+          <span>Custom Fields</span>
+        </button>
+        <div class="db-badge">
+          <span class="status-dot"></span> Cloudflare D1 Local
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="main-content">
+      <!-- Top Navigation -->
+      <header class="topbar">
+        <div class="project-meta">
+          <div class="title-with-actions">
+            <button id="btnToggleProjectsSidebar" class="btn-icon-subtle projects-sidebar-toggle" type="button"
+              aria-controls="projectsSidebar" aria-expanded="true" aria-label="Hide projects sidebar"
+              title="Hide projects sidebar">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <rect x="3" y="4" width="18" height="16" rx="2" />
+                <path d="M9 4v16M13 9h4M13 12h4M13 15h4" />
+              </svg>
+            </button>
+            <h1 id="currentProjectTitle">Select a Project</h1>
+            <button id="btnEditProject" class="btn-icon-subtle edit-required" title="Project Settings & Default View">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-4 h-4">
+                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+              </svg>
+            </button>
+          </div>
+          <p id="currentProjectDesc" class="project-subtitle"></p>
+        </div>
+
+        <div class="view-switcher">
+          <button class="view-btn active" data-view="folder">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-4 h-4">
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+            </svg>
+            Folders & Grades
+          </button>
+          <button class="view-btn" data-view="board">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-4 h-4">
+              <rect x="3" y="3" width="7" height="18" rx="1" />
+              <rect x="14" y="3" width="7" height="18" rx="1" />
+            </svg>
+            Board
+          </button>
+          <button class="view-btn" data-view="list">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-4 h-4">
+              <line x1="8" y1="6" x2="21" y2="6" />
+              <line x1="8" y1="12" x2="21" y2="12" />
+              <line x1="8" y1="18" x2="21" y2="18" />
+              <line x1="3" y1="6" x2="3.01" y2="6" />
+              <line x1="3" y1="12" x2="3.01" y2="12" />
+              <line x1="3" y1="18" x2="3.01" y2="18" />
+            </svg>
+            List
+          </button>
+          <button class="view-btn" data-view="gantt">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-4 h-4">
+              <rect x="3" y="4" width="18" height="18" rx="2" />
+              <line x1="16" y1="2" x2="16" y2="6" />
+              <line x1="8" y1="2" x2="8" y2="6" />
+              <line x1="3" y1="10" x2="21" y2="10" />
+              <line x1="7" y1="14" x2="13" y2="14" />
+              <line x1="10" y1="18" x2="17" y2="18" />
+            </svg>
+            Gantt Chart
+          </button>
+        </div>
+
+        <div class="topbar-actions">
+          <button id="btnToggleTheme" class="btn-secondary" type="button" aria-pressed="false">Light mode</button>
+          <button id="btnDataTransfer" class="btn-secondary">Import / Export</button>
+          <button id="btnNewFolderTop" class="btn-secondary edit-required">+ New Folder</button>
+          <button id="btnAddTask" class="btn-primary edit-required">+ Add Task</button>
+        </div>
+      </header>
+
+      <!-- View Containers -->
+      <!-- 0. Restricted Screen (shown when project permission is 'none') -->
+      <section id="restrictedView" class="view-section hidden">
+        <div class="empty-state-card">
+          <div class="empty-state-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="4" y="10" width="16" height="11" rx="2" />
+              <path d="M8 10V7a4 4 0 1 1 8 0v3M12 14v3" />
+            </svg>
+          </div>
+          <h2>Project Access Denied</h2>
+          <p id="restrictedMsg">You do not have view or edit permissions for this project. Contact a project manager or
+            switch to an authorized user account.</p>
+        </div>
+      </section>
+
+      <!-- 1. Folders, Nested Subfolders & Hierarchical Grades View -->
+      <section id="folderView" class="view-section active">
+        <!-- Grade Summary Metric Cards -->
+        <div class="grade-cards-grid">
+          <div class="grade-scope-control">
+            <label for="gradeScopeSelect">Stats for</label>
+            <select id="gradeScopeSelect"
+              aria-label="Choose the top-level folder for grade and completion stats"></select>
+          </div>
+          <div class="grade-card current">
+            <div class="grade-card-label">Current Grade</div>
+            <div class="grade-card-val" id="valCurrentGrade">--</div>
+            <div class="grade-card-sub" id="subCurrentGrade">Weighted course points earned so far</div>
+          </div>
+          <div class="grade-card max">
+            <div class="grade-card-label">Maximum Possible Grade</div>
+            <div class="grade-card-val" id="valMaxGrade">--</div>
+            <div class="grade-card-sub">Assumes 100% on remaining assignments</div>
+          </div>
+          <div class="grade-card min">
+            <div class="grade-card-label">Minimum Possible Grade</div>
+            <div class="grade-card-val" id="valMinGrade">--</div>
+            <div class="grade-card-sub">Floor grade if 0% on remaining work</div>
+          </div>
+          <div class="grade-card pace">
+            <div class="grade-card-label">Overall Completion</div>
+            <div class="grade-card-val" id="valClassProgress">--</div>
+            <div class="grade-card-sub" id="subClassProgress">0 / 0 tasks completed</div>
+          </div>
+        </div>
+
+        <!-- Folder Hierarchy & Tasks Container -->
+        <div class="folders-workspace-card">
+          <div class="workspace-header">
+            <div class="workspace-title-group">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-5 h-5"
+                style="color:var(--accent);">
+                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+              </svg>
+              <h3>Folder Tree & Nested Subfolders</h3>
+            </div>
+            <div class="workspace-actions">
+              <span id="folderSelectedTaskCount" class="form-hint" aria-live="polite">0 selected</span>
+              <button id="btnExportSelectedFolderTasks" class="btn-secondary" type="button" disabled>Export selected</button>
+              <span class="form-hint">Double click any task to edit details or grades</span>
+            </div>
+          </div>
+          <div id="folderTreeContainer" class="folder-tree-container">
+            <!-- Dynamically populated hierarchical tree -->
+          </div>
+        </div>
+      </section>
+
+      <!-- 2. Kanban Board -->
+      <section id="boardView" class="view-section">
+        <div class="kanban-grid">
+          <div class="kanban-column" data-status="todo">
+            <div class="column-header">
+              <span class="column-title">Not Active</span>
+              <span class="task-count" id="count-todo">0</span>
+            </div>
+            <div class="column-tasks" id="tasks-todo"></div>
+          </div>
+          <div class="kanban-column" data-status="in_progress">
+            <div class="column-header">
+              <span class="column-title">Active</span>
+              <span class="task-count" id="count-in_progress">0</span>
+            </div>
+            <div class="column-tasks" id="tasks-in_progress"></div>
+          </div>
+          <div class="kanban-column" data-status="done">
+            <div class="column-header">
+              <span class="column-title">Completed</span>
+              <span class="task-count" id="count-done">0</span>
+            </div>
+            <div class="column-tasks" id="tasks-done"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 3. Table List View -->
+      <section id="listView" class="view-section">
+        <div class="list-toolbar">
+          <label class="list-filter"><input id="excludeDoneTasks" type="checkbox"> Hide completed tasks</label>
+          <span id="listSortSummary" class="list-sort-summary">Sort order: Status ↑</span>
+          <span class="list-sort-hint">Click a heading for primary sort; Shift+click to add or change ranked
+            sorts.</span>
+          <button id="clearListSort" class="btn-secondary" type="button">Clear sort</button>
+          <span id="selectedTaskCount" class="list-sort-summary" aria-live="polite">0 selected</span>
+          <button id="btnExportSelectedListTasks" class="btn-secondary" type="button" disabled>Export selected</button>
+          <button id="btnDeleteSelectedTasks" class="btn-danger" type="button" disabled>Delete selected</button>
+        </div>
+        <div class="list-container">
+          <table class="task-table">
+            <thead>
+              <tr id="listTableHeaders">
+                <th>Status</th>
+                <th>Task Title</th>
+                <th>Folder Path</th>
+                <th>Priority</th>
+                <th>Start Date</th>
+                <th>Due Date</th>
+                <th>Grade / Score</th>
+                <th>Dependencies</th>
+                <th>Progress</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="listTableBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- 4. Gantt Chart View -->
+      <section id="ganttView" class="view-section">
+        <div class="gantt-header-bar">
+          <div class="gantt-controls">
+            <label for="ganttDayWidth">Day width</label>
+            <input type="range" id="ganttDayWidth" min="16" max="160" step="4" value="40">
+            <output id="ganttDayWidthValue">40 px</output>
+            <label for="ganttRangeStart">From</label>
+            <input type="date" id="ganttRangeStart" aria-label="Gantt range start">
+            <label for="ganttRangeEnd">To</label>
+            <input type="date" id="ganttRangeEnd" aria-label="Gantt range end">
+            <button type="button" class="btn-secondary gantt-control-button" id="applyGanttRange">Apply</button>
+            <button type="button" class="btn-secondary gantt-control-button" id="resetGanttRange">Reset range</button>
+            <label class="gantt-hide-completed"><input id="excludeDoneTasksGantt" type="checkbox"> Hide completed</label>
+            <button type="button" class="btn-secondary gantt-control-button" id="toggleGanttSidebar">Hide task
+              names</button>
+            <button type="button" class="btn-secondary gantt-control-button" id="exportGanttSvg">Export Gantt
+              SVG</button>
+            <span class="gantt-tip">Double click any task bar or row to edit details.</span>
+          </div>
+        </div>
+        <div class="gantt-viewport" id="ganttViewport">
+          <div class="gantt-sidebar-col" id="ganttSidebarCol"></div>
+          <div class="gantt-resize-handle" id="ganttResizeHandle" role="separator" aria-orientation="vertical"
+            aria-label="Resize task name column" tabindex="0"></div>
+          <div class="gantt-chart-area" id="ganttChartArea">
+            <div class="gantt-timeline-header" id="ganttTimelineHeader"></div>
+            <div class="gantt-canvas" id="ganttCanvas">
+              <svg id="ganttSvgLines" class="gantt-svg-overlay"></svg>
+              <div id="ganttBarsContainer" class="gantt-bars-container"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Task Modal (Create & Edit) -->
+  <div id="taskModal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2 id="taskModalTitle">Task Details</h2>
+        <button class="modal-close" id="btnCloseTaskModal">&times;</button>
+      </div>
+      <form id="taskForm">
+        <input type="hidden" id="taskId">
+
+        <div class="form-group">
+          <label for="taskTitle">Task Title *</label>
+          <input type="text" id="taskTitle" required placeholder="e.g. Dynamic Programming Assignment...">
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label for="taskFolder">Folder / Subfolder</label>
+            <select id="taskFolder">
+              <option value="">-- General / No Folder --</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="taskStatus">Status group</label>
+            <select id="taskStatus">
+              <option value="todo">Not Active</option>
+              <option value="in_progress">Active</option>
+              <option value="done">Completed</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-group">
+          <label for="taskStatusLabel">Status option</label>
+          <select id="taskStatusLabel">
+            <option value="">Use the group name</option>
+          </select>
+          <span class="form-hint">Add or edit options in the project settings.</span>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label for="taskEarnedPoints">Earned Points</label>
+            <input type="number" id="taskEarnedPoints" step="0.1" placeholder="e.g. 95 (leave empty if not graded)">
+          </div>
+          <div class="form-group">
+            <label for="taskMaxPoints">Max Points</label>
+            <input type="number" id="taskMaxPoints" step="0.1" placeholder="e.g. 100">
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label for="taskGrade">Grade Override % <span class="form-hint"
+                style="display:inline; font-size:0.72rem;">(optional — overrides points ratio for
+                calculations)</span></label>
+            <input type="number" id="taskGrade" step="0.01" min="0" placeholder="e.g. 105 (leave blank to use points)">
+          </div>
+          <div class="form-group form-checkbox-group">
+            <label for="taskExtraCredit">
+              <input type="checkbox" id="taskExtraCredit">
+              Extra credit (up to 2x; unearned work does not lower the grade)
+            </label>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label for="taskPriority">Priority</label>
+            <select id="taskPriority">
+              <option value="none">None</option>
+              <option value="low">Low</option>
+              <option value="medium" selected>Medium</option>
+              <option value="high">High</option>
+              <option value="urgent">Urgent</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="taskDueDate">Due Date</label>
+            <input type="date" id="taskDueDate">
+          </div>
+          <div class="form-group">
+            <label for="taskDueTime">Due Time <span class="form-hint">(defaults to end of day)</span></label>
+            <input type="time" id="taskDueTime">
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label for="taskStartDate">Start Date</label>
+            <input type="date" id="taskStartDate">
+          </div>
+          <div class="form-group">
+            <label for="taskStartTime">Start / Reminder Time</label>
+            <input type="time" id="taskStartTime">
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label for="taskOpenAt">Task Opens At <span class="form-hint">(optional)</span></label>
+            <input type="datetime-local" id="taskOpenAt">
+          </div>
+          <div class="form-group">
+            <label for="taskProgress">Progress (<span id="progressLabel">0</span>%)</label>
+            <input type="range" id="taskProgress" min="0" max="100" value="0" step="5">
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="taskDependencies">Depends On (Predecessor Tasks)</label>
+          <select id="taskDependencies" multiple class="multi-select"
+            title="Hold Ctrl/Cmd to select multiple dependencies">
+            <!-- Dynamically populated -->
+          </select>
+        </div>
+
+        <!-- Custom Fields Container -->
+        <div class="custom-fields-section" id="taskCustomFieldsGroup">
+          <span class="custom-fields-title">Project Custom Fields</span>
+          <div id="dynamicCustomFieldsContainer"></div>
+        </div>
+
+        <div class="form-group">
+          <label for="taskDesc">Description / Notes</label>
+          <textarea id="taskDesc" rows="3" placeholder="Add study notes, rubrics, or requirements..."></textarea>
+        </div>
+
+        <div class="modal-footer">
+          <button type="button" id="btnDeleteTask" class="btn-danger hidden edit-required">Delete Task</button>
+          <div class="footer-spacer"></div>
+          <button type="button" class="btn-secondary" id="btnCancelTaskModal">Cancel</button>
+          <button type="submit" class="btn-primary edit-required" id="btnSaveTask">Save Task</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Task Import / Export Modal -->
+  <div id="dataTransferModal" class="modal-overlay hidden">
+    <div class="modal-card modal-lg">
+      <div class="modal-header">
+        <h2>Task Import / Export</h2>
+        <button class="modal-close" id="btnCloseDataTransfer">&times;</button>
+      </div>
+      <div class="data-transfer-body">
+        <section class="transfer-panel">
+          <h3>Export tasks</h3>
+          <p id="taskExportHint" class="form-hint">JSON preserves this app's folders, custom fields, project settings,
+            and task dependencies.</p>
+          <div class="form-row transfer-export-row">
+            <div class="form-group">
+              <label for="taskExportFormat">Export format</label>
+              <select id="taskExportFormat">
+                <option value="json">MyPlan JSON backup</option>
+                <option value="csv">Generic CSV</option>
+                <option value="planner">Microsoft Planner spreadsheet CSV</option>
+                <option value="monday">monday.com CSV</option>
+                <option value="clickup">ClickUp CSV</option>
+              </select>
+            </div>
+            <button type="button" class="btn-primary" id="btnExportTasks">Download tasks</button>
+          </div>
+        </section>
+        <section class="transfer-panel">
+          <h3>Import tasks</h3>
+          <p class="form-hint">Choose CSV or a MyPlan JSON backup. Imports add tasks to this project; they do not
+            replace existing data. Save a Microsoft Planner Excel export as CSV before importing it here. This app does
+            not connect to the other services or create tasks in them.</p>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="taskImportFormat">Source format</label>
+              <select id="taskImportFormat">
+                <option value="auto">Auto-detect</option>
+                <option value="generic">Generic CSV</option>
+                <option value="planner">Microsoft Planner CSV</option>
+                <option value="monday">monday.com CSV</option>
+                <option value="clickup">ClickUp CSV</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="taskImportFile">Choose CSV or JSON file</label>
+              <input type="file" id="taskImportFile" accept=".csv,.json,.txt,text/csv,application/json">
+            </div>
+          </div>
+          <div id="taskImportPreview" class="import-preview" aria-live="polite">Choose a file to preview its rows.</div>
+          <div class="modal-footer transfer-footer">
+            <span class="form-hint">Unknown columns become custom text fields. Review the preview before
+              importing.</span>
+            <button type="button" class="btn-primary edit-required" id="btnImportTasks" disabled>Import tasks</button>
+          </div>
+        </section>
+      </div>
+      <div class="modal-footer">
+        <div class="footer-spacer"></div>
+        <button type="button" class="btn-secondary" id="btnCancelDataTransfer">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Folder & Subfolder Modal -->
+  <div id="folderModal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2 id="folderModalTitle">New Folder / Subfolder</h2>
+        <button class="modal-close" id="btnCloseFolderModal">&times;</button>
+      </div>
+      <form id="folderForm">
+        <input type="hidden" id="folderId">
+        <div class="form-group">
+          <label for="folderName">Folder Name *</label>
+          <input type="text" id="folderName" required placeholder="e.g. CS 301 (Algorithms), Homework, Midterms...">
+        </div>
+        <div class="form-group">
+          <label for="folderParent">Parent Folder (Select for Nested Subfolder)</label>
+          <select id="folderParent">
+            <option value="">-- None (Root Folder / Class) --</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="folderWeight">Grade Weight / Rate (%)</label>
+            <input type="number" id="folderWeight" step="0.01" min="0" placeholder="e.g. 30 or 2.5">
+          </div>
+          <div class="form-group">
+            <label for="folderColor">Badge Color</label>
+            <input type="color" id="folderColor" value="#25c2fd">
+          </div>
+        </div>
+        <div class="form-group">
+          <label for="folderDropLowest">Drop Lowest Tasks</label>
+          <input type="number" id="folderDropLowest" step="1" min="0" value="0" placeholder="0">
+          <span class="form-hint">Applies to tasks counted in this folder score, including weighted subfolders. Current drops lowest graded tasks; maximum drops lowest entered grades; minimum drops ungraded tasks first.</span>
+        </div>
+        <div class="form-group">
+          <label for="folderDesc">Description</label>
+          <textarea id="folderDesc" rows="2" placeholder="Syllabus requirements or goals..."></textarea>
+        </div>
+        <div class="modal-footer">
+          <button type="button" id="btnDeleteFolder" class="btn-danger hidden edit-required">Delete Folder</button>
+          <div class="footer-spacer"></div>
+          <button type="button" class="btn-secondary" id="btnCancelFolderModal">Cancel</button>
+          <button type="submit" class="btn-primary edit-required">Save Folder</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Project Modal -->
+  <div id="projectModal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2 id="projectModalTitle">Project Settings & Default View</h2>
+        <button class="modal-close" id="btnCloseProjModal">&times;</button>
+      </div>
+      <form id="projectForm">
+        <input type="hidden" id="editProjId">
+        <div class="form-group">
+          <label for="projName">Project Name *</label>
+          <input type="text" id="projName" required placeholder="e.g. Fall 2026 Coursework...">
+        </div>
+        <div class="form-group">
+          <label for="projDesc">Description</label>
+          <textarea id="projDesc" rows="2" placeholder="Course goals or team workflow..."></textarea>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="projDefaultView">Default Landing View</label>
+            <select id="projDefaultView">
+              <option value="folder">Folders & Grades View</option>
+              <option value="board">Kanban Board</option>
+              <option value="list">List View</option>
+              <option value="gantt">Gantt Chart</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="projColor">Accent Color</label>
+            <input type="color" id="projColor" value="#38d8aa">
+          </div>
+        </div>
+        <fieldset class="project-calendar-settings">
+          <legend>Task status options</legend>
+          <p class="form-hint">Add one status per line (up to 20 per group, 60 characters each). Options are available
+            when editing tasks. Removing an option does not change tasks already using it.</p>
+          <div class="form-group">
+            <label for="statusOptionsTodo">Not Active</label>
+            <textarea id="statusOptionsTodo" rows="2" maxlength="1600" placeholder="Backlog&#10;Waiting"></textarea>
+          </div>
+          <div class="form-group">
+            <label for="statusOptionsInProgress">Active</label>
+            <textarea id="statusOptionsInProgress" rows="2" maxlength="1600"
+              placeholder="In Review&#10;Blocked"></textarea>
+          </div>
+          <div class="form-group">
+            <label for="statusOptionsDone">Completed</label>
+            <textarea id="statusOptionsDone" rows="2" maxlength="1600" placeholder="Verified&#10;Archived"></textarea>
+          </div>
+        </fieldset>
+        <fieldset class="project-calendar-settings">
+          <legend>Non-working days</legend>
+          <p class="form-hint">Choose the weekdays to shade as non-working time in this project.</p>
+          <div class="project-weekday-options">
+            <label><input class="project-day-checkbox" type="checkbox" value="0"> Sun</label>
+            <label><input class="project-day-checkbox" type="checkbox" value="1"> Mon</label>
+            <label><input class="project-day-checkbox" type="checkbox" value="2"> Tue</label>
+            <label><input class="project-day-checkbox" type="checkbox" value="3"> Wed</label>
+            <label><input class="project-day-checkbox" type="checkbox" value="4"> Thu</label>
+            <label><input class="project-day-checkbox" type="checkbox" value="5"> Fri</label>
+            <label><input class="project-day-checkbox" type="checkbox" value="6"> Sat</label>
+          </div>
+          <label for="projectHolidayDate">Project holidays</label>
+          <div class="project-holiday-add">
+            <input type="date" id="projectHolidayDate">
+            <button type="button" class="btn-secondary" id="btnAddProjectHoliday">Add date</button>
+          </div>
+          <div id="projectHolidayList" class="project-holiday-list"></div>
+        </fieldset>
+        <div class="modal-footer">
+          <button type="button" id="btnDeleteProject" class="btn-danger hidden edit-required">Delete Project</button>
+          <div class="footer-spacer"></div>
+          <button type="button" class="btn-secondary" id="btnCancelProjModal">Cancel</button>
+          <button type="submit" class="btn-primary edit-required">Save Project</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Project Dependent Permissions Modal -->
+  <div id="membersModal" class="modal-overlay hidden">
+    <div class="modal-card modal-lg">
+      <div class="modal-header">
+        <h2 id="membersModalHeading">Users & Project Permissions</h2>
+        <button class="modal-close" id="btnCloseMembersModal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p id="membersModalHelp" class="form-hint" style="margin-bottom: 1rem;">
+          Manage accounts and configure project access. System administrators have global access until their system role
+          changes.
+          Current project: <strong id="membersProjectTitle"></strong>:
+        </p>
+        <form id="newUserForm" class="member-create-form">
+          <h3>Add user</h3>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="newUserUsername">Username</label>
+              <input id="newUserUsername" type="text" maxlength="80" autocomplete="off" required>
+            </div>
+            <div class="form-group">
+              <label for="newUserName">Full name</label>
+              <input id="newUserName" type="text" maxlength="100" autocomplete="off" required>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="newUserPassword">Initial password (at least 12 characters)</label>
+              <input id="newUserPassword" type="password" minlength="12" maxlength="1024" autocomplete="new-password"
+                required>
+            </div>
+            <div class="form-group">
+              <label for="newUserSystemRole">System role</label>
+              <select id="newUserSystemRole">
+                <option value="user">User</option>
+                <option value="admin">System administrator</option>
+              </select>
+            </div>
+          </div>
+          <button type="submit" class="btn-primary">Add user</button>
+        </form>
+        <div class="table-responsive">
+          <table class="user-table">
+            <thead>
+              <tr>
+                <th>Username</th>
+                <th>Full Name</th>
+                <th>System Role</th>
+                <th class="project-access-column">Project Access Level</th>
+                <th class="project-access-column">Change Access</th>
+                <th>Account</th>
+              </tr>
+            </thead>
+            <tbody id="projectMembersTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Custom Fields Management Modal -->
+  <div id="fieldsModal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2>Manage Custom Fields</h2>
+        <button class="modal-close" id="btnCloseFieldsModal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="fields-list" id="fieldsList"></div>
+        <hr class="modal-divider">
+        <h3 id="fieldFormHeading">Add Custom Field</h3>
+        <form id="newFieldForm" class="new-field-grid">
+          <input type="hidden" id="editingFieldId">
+          <div class="form-group">
+            <label for="newFieldName">Field Name</label>
+            <input type="text" id="newFieldName" placeholder="e.g. Room, Textbook, Link..." required>
+          </div>
+          <div class="form-group">
+            <label for="newFieldType">Field Type</label>
+            <select id="newFieldType">
+              <option value="text">Text</option>
+              <option value="number">Number</option>
+              <option value="select">Dropdown / Select</option>
+              <option value="date">Date</option>
+              <option value="checkbox">Checkbox (Yes/No)</option>
+            </select>
+          </div>
+          <div class="form-group full-width" id="selectOptionsGroup" style="display: none;">
+            <label for="newFieldOptions">Options (comma-separated)</label>
+            <input type="text" id="newFieldOptions" placeholder="Option A, Option B">
+          </div>
+          <div class="full-width" style="display: flex; gap: 0.5rem;">
+            <button type="submit" class="btn-primary" id="btnSaveField" style="flex:1;">+ Add Field</button>
+            <button type="button" class="btn-secondary hidden" id="btnCancelEditField">Cancel Edit</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+
+</html>

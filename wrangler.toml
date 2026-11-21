@@ -1,0 +1,13 @@
+name = "projectmanagement"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "pm_db"
+database_id = "local-pm-db"
+migrations_dir = "migrations"
