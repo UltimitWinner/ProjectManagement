@@ -124,7 +124,7 @@ async function rateLimitKey(value, pepper) {
 async function recordLoginAttempt(db, key, limit, windowMs = 60000) {
   const now = Date.now();
   const windowStart = Math.floor(now / windowMs) * windowMs;
-  await db.prepare(`
+  const row = await db.prepare(`
     INSERT INTO auth_rate_limits (id, window_start_ms, attempt_count)
     VALUES (?, ?, 1)
     ON CONFLICT(id) DO UPDATE SET
@@ -133,8 +133,8 @@ async function recordLoginAttempt(db, key, limit, windowMs = 60000) {
         ELSE 1
       END,
       window_start_ms = excluded.window_start_ms
-  `).bind(key, windowStart).run();
-  const row = await db.prepare('SELECT attempt_count FROM auth_rate_limits WHERE id = ?').bind(key).first();
+    RETURNING attempt_count
+  `).bind(key, windowStart).first();
 
   // Opportunistic cleanup keeps the persistent limiter table bounded.
   if (Math.random() < 0.01) {
@@ -144,7 +144,20 @@ async function recordLoginAttempt(db, key, limit, windowMs = 60000) {
 }
 
 // Table schema initialization & migration
+const initializedDatabases = new WeakMap();
 async function initTables(db) {
+  if (initializedDatabases.has(db)) return initializedDatabases.get(db);
+  const initialization = initializeTables(db);
+  initializedDatabases.set(db, initialization);
+  try {
+    await initialization;
+  } catch (error) {
+    initializedDatabases.delete(db);
+    throw error;
+  }
+}
+
+async function initializeTables(db) {
   await db.batch([
     db.prepare(`CREATE TABLE IF NOT EXISTS projects (
       id TEXT PRIMARY KEY,
@@ -1291,15 +1304,21 @@ app.delete('/api/folders/:id', async (c) => {
   const access = await getProjectAccessLevel(db, folder.project_id, user);
   if (!verifyProjectPermission(access, 'edit')) return c.json({ error: 'Requires edit permission on project' }, 403);
 
-  // Recursively delete all descendant folders before deleting the target
-  async function deleteRecursive(folderId) {
-    const { results: children } = await db.prepare('SELECT id FROM folders WHERE parent_id = ?').bind(folderId).all();
-    for (const child of (children || [])) {
-      await deleteRecursive(child.id);
-    }
-    await db.prepare('DELETE FROM folders WHERE id = ?').bind(folderId).run();
+  const { results: allFolders } = await db.prepare('SELECT id, parent_id FROM folders WHERE project_id = ?').bind(folder.project_id).all();
+  const childrenByParent = new Map();
+  for (const row of allFolders || []) {
+    const parent = row.parent_id || '';
+    if (!childrenByParent.has(parent)) childrenByParent.set(parent, []);
+    childrenByParent.get(parent).push(row.id);
   }
-  await deleteRecursive(id);
+  const subtree = [];
+  const pending = [id];
+  while (pending.length) {
+    const folderId = pending.pop();
+    subtree.push(folderId);
+    pending.push(...(childrenByParent.get(folderId) || []));
+  }
+  await db.batch(subtree.map(folderId => db.prepare('DELETE FROM folders WHERE id = ?').bind(folderId)));
   return c.json({ success: true });
 });
 
@@ -1407,16 +1426,21 @@ app.get('/api/projects/:id/tasks', async (c) => {
     WHERE t.project_id = ?
   `).bind(projectId).all();
 
+  const dependenciesByTask = new Map();
+  for (const dep of deps || []) {
+    if (!dependenciesByTask.has(dep.task_id)) dependenciesByTask.set(dep.task_id, []);
+    dependenciesByTask.get(dep.task_id).push(dep.depends_on_task_id);
+  }
+  const customValuesByTask = new Map();
+  for (const value of customVals || []) {
+    if (!customValuesByTask.has(value.task_id)) customValuesByTask.set(value.task_id, {});
+    customValuesByTask.get(value.task_id)[value.custom_field_id] = value.value;
+  }
   const taskMap = (tasks || []).map(task => {
-    const dependencies = (deps || []).filter(d => d.task_id === task.id).map(d => d.depends_on_task_id);
-    const customFields = {};
-    (customVals || []).filter(cv => cv.task_id === task.id).forEach(cv => {
-      customFields[cv.custom_field_id] = cv.value;
-    });
     return {
       ...task,
-      dependencies,
-      custom_values: customFields
+      dependencies: dependenciesByTask.get(task.id) || [],
+      custom_values: customValuesByTask.get(task.id) || {}
     };
   });
 
@@ -1563,11 +1587,12 @@ app.post('/api/projects/:id/tasks', async (c) => {
     never_drop
   ).run();
 
+  const relatedWrites = [];
   if (Array.isArray(body.dependencies)) {
     for (const depId of body.dependencies) {
       if (depId && depId !== id) {
         const depKey = 'dep-' + generateSalt().substring(0, 8);
-        await db.prepare('INSERT OR IGNORE INTO task_dependencies (id, task_id, depends_on_task_id) VALUES (?, ?, ?)').bind(depKey, id, depId).run();
+        relatedWrites.push(db.prepare('INSERT OR IGNORE INTO task_dependencies (id, task_id, depends_on_task_id) VALUES (?, ?, ?)').bind(depKey, id, depId));
       }
     }
   }
@@ -1575,10 +1600,11 @@ app.post('/api/projects/:id/tasks', async (c) => {
   if (body.custom_values && typeof body.custom_values === 'object') {
     for (const [cfId, val] of Object.entries(body.custom_values)) {
       if (val !== undefined && val !== null) {
-        await db.prepare('INSERT OR REPLACE INTO task_custom_values (task_id, custom_field_id, value) VALUES (?, ?, ?)').bind(id, cfId, sanitizeString(String(val), 500)).run();
+        relatedWrites.push(db.prepare('INSERT OR REPLACE INTO task_custom_values (task_id, custom_field_id, value) VALUES (?, ?, ?)').bind(id, cfId, sanitizeString(String(val), 500)));
       }
     }
   }
+  if (relatedWrites.length) await db.batch(relatedWrites);
 
   return c.json({ id, ...body, title, description }, 201);
 });
@@ -1633,12 +1659,13 @@ app.put('/api/tasks/:id', async (c) => {
     id
   ).run();
 
+  const relatedWrites = [];
   if (Array.isArray(body.dependencies)) {
-    await db.prepare('DELETE FROM task_dependencies WHERE task_id = ?').bind(id).run();
+    relatedWrites.push(db.prepare('DELETE FROM task_dependencies WHERE task_id = ?').bind(id));
     for (const depId of body.dependencies) {
       if (depId && depId !== id) {
         const depKey = 'dep-' + generateSalt().substring(0, 8);
-        await db.prepare('INSERT OR IGNORE INTO task_dependencies (id, task_id, depends_on_task_id) VALUES (?, ?, ?)').bind(depKey, id, depId).run();
+        relatedWrites.push(db.prepare('INSERT OR IGNORE INTO task_dependencies (id, task_id, depends_on_task_id) VALUES (?, ?, ?)').bind(depKey, id, depId));
       }
     }
   }
@@ -1646,12 +1673,13 @@ app.put('/api/tasks/:id', async (c) => {
   if (body.custom_values && typeof body.custom_values === 'object') {
     for (const [cfId, val] of Object.entries(body.custom_values)) {
       if (val === null || val === '') {
-        await db.prepare('DELETE FROM task_custom_values WHERE task_id = ? AND custom_field_id = ?').bind(id, cfId).run();
+        relatedWrites.push(db.prepare('DELETE FROM task_custom_values WHERE task_id = ? AND custom_field_id = ?').bind(id, cfId));
       } else {
-        await db.prepare('INSERT OR REPLACE INTO task_custom_values (task_id, custom_field_id, value) VALUES (?, ?, ?)').bind(id, cfId, sanitizeString(String(val), 500)).run();
+        relatedWrites.push(db.prepare('INSERT OR REPLACE INTO task_custom_values (task_id, custom_field_id, value) VALUES (?, ?, ?)').bind(id, cfId, sanitizeString(String(val), 500)));
       }
     }
   }
+  if (relatedWrites.length) await db.batch(relatedWrites);
 
   return c.json({ success: true });
 });
