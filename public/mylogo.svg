@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="280" height="190" viewBox="0 0 280 190" role="img" aria-labelledby="title">
+  <title id="title">MyPlan logo</title>
+  <defs>
+    <linearGradient id="gold" x1="0" y1="150" x2="280" y2="80" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#d4af37"/>
+      <stop offset=".125" stop-color="#b8860b"/>
+      <stop offset=".25" stop-color="#ffcc00"/>
+      <stop offset=".375" stop-color="#996515"/>
+      <stop offset=".5" stop-color="#b8860b"/>
+      <stop offset=".625" stop-color="#996515"/>
+      <stop offset=".75" stop-color="#ffcc00"/>
+      <stop offset=".875" stop-color="#d4af37"/>
+      <stop offset="1" stop-color="#996515"/>
+    </linearGradient>
+  </defs>
+  <path fill="url(#gold)" d="M50 0 0 150h30L69.564 31.305 100 80l70.4-51.2-39.238 117.711L60 190h40L280 80h-40l-71.163 43.488L210 0h-30l-70 50L80 0z"/>
+</svg>
