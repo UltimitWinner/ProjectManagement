@@ -56,3 +56,10 @@ $RECYCLE.BIN/
 *.sw?
 *.sublime-project
 *.sublime-workspace
+
+# Test files
+*.sample.html
+*.sample_files/
+*.myplan-import.json
+__pycache__/
+*.py[cod]

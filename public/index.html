@@ -235,8 +235,9 @@
             </div>
             <div class="workspace-actions">
               <span id="folderSelectedTaskCount" class="form-hint" aria-live="polite">0 selected</span>
-              <button id="btnExportSelectedFolderTasks" class="btn-secondary" type="button" disabled>Export selected</button>
-              <span class="form-hint">Double click any task to edit details or grades</span>
+              <button id="btnExportSelectedFolderTasks" class="btn-secondary" type="button" disabled>Export
+                selected</button>
+              <span class="form-hint">Drag folder headers or tasks to reorder · Tasks stay in their folder · Double click a task to edit</span>
             </div>
           </div>
           <div id="folderTreeContainer" class="folder-tree-container">
@@ -318,7 +319,8 @@
             <input type="date" id="ganttRangeEnd" aria-label="Gantt range end">
             <button type="button" class="btn-secondary gantt-control-button" id="applyGanttRange">Apply</button>
             <button type="button" class="btn-secondary gantt-control-button" id="resetGanttRange">Reset range</button>
-            <label class="gantt-hide-completed"><input id="excludeDoneTasksGantt" type="checkbox"> Hide completed</label>
+            <label class="gantt-hide-completed"><input id="excludeDoneTasksGantt" type="checkbox"> Hide
+              completed</label>
             <button type="button" class="btn-secondary gantt-control-button" id="toggleGanttSidebar">Hide task
               names</button>
             <button type="button" class="btn-secondary gantt-control-button" id="exportGanttSvg">Export Gantt
@@ -507,9 +509,8 @@
         </section>
         <section class="transfer-panel">
           <h3>Import tasks</h3>
-          <p class="form-hint">Choose CSV or a MyPlan JSON backup. Imports add tasks to this project; they do not
-            replace existing data. Save a Microsoft Planner Excel export as CSV before importing it here. This app does
-            not connect to the other services or create tasks in them.</p>
+          <p class="form-hint">Import CSV, JSON, or a saved BYU Learning Suite Assignments page. CSV and JSON imports
+            add tasks to this project. The Learning Suite option can update matching tasks and category weights.</p>
           <div class="form-row">
             <div class="form-group">
               <label for="taskImportFormat">Source format</label>
@@ -519,13 +520,29 @@
                 <option value="planner">Microsoft Planner CSV</option>
                 <option value="monday">monday.com CSV</option>
                 <option value="clickup">ClickUp CSV</option>
+                <option value="learning_suite_html">BYU Learning Suite saved page (HTML)</option>
               </select>
             </div>
             <div class="form-group">
-              <label for="taskImportFile">Choose CSV or JSON file</label>
-              <input type="file" id="taskImportFile" accept=".csv,.json,.txt,text/csv,application/json">
+              <label for="taskImportFile">Choose CSV, JSON, or saved HTML file</label>
+              <input type="file" id="taskImportFile" accept=".csv,.json,.txt,.html,text/csv,text/html,application/json">
             </div>
           </div>
+          <div class="form-group" id="taskImportCourseNameGroup" hidden>
+            <label for="taskImportCourseName">Course name</label>
+            <input type="text" id="taskImportCourseName" maxlength="100" placeholder="For example, UNIV 101">
+            <small class="form-hint">Input the name you want to use for this folder.</small>
+          </div>
+          <p class="form-hint" id="learningSuiteImportInstructions" hidden>
+            In Learning Suite, open the course’s <strong>BYU Grades → Assignments</strong> page, press
+            <kbd>Ctrl</kbd>+<kbd>S</kbd>, and save as <strong>Webpage, HTML only</strong> if prompted. Then select that
+            HTML file here. MyPlan reads the saved file in your browser; it does not log in to Learning Suite or upload
+            the raw HTML page.
+          </p>
+          <label class="form-hint transfer-import-option" id="taskImportUpdateMatchesGroup" hidden>
+            <input type="checkbox" id="taskImportUpdateMatches" checked>
+            Update matching Learning Suite tasks instead of adding duplicates (category weights always refresh)
+          </label>
           <div id="taskImportPreview" class="import-preview" aria-live="polite">Choose a file to preview its rows.</div>
           <div class="modal-footer transfer-footer">
             <span class="form-hint">Unknown columns become custom text fields. Review the preview before
@@ -563,7 +580,7 @@
         <div class="form-row">
           <div class="form-group">
             <label for="folderWeight">Grade Weight / Rate (%)</label>
-            <input type="number" id="folderWeight" step="0.01" min="0" placeholder="e.g. 30 or 2.5">
+            <input type="number" id="folderWeight" step="any" min="0" placeholder="e.g. 30 or 2.5">
           </div>
           <div class="form-group">
             <label for="folderColor">Badge Color</label>
@@ -573,7 +590,15 @@
         <div class="form-group">
           <label for="folderDropLowest">Drop Lowest Tasks</label>
           <input type="number" id="folderDropLowest" step="1" min="0" value="0" placeholder="0">
-          <span class="form-hint">Applies to tasks counted in this folder score, including weighted subfolders. Current drops lowest graded tasks; maximum drops lowest entered grades; minimum drops ungraded tasks first.</span>
+          <span class="form-hint">Applies to tasks counted in this folder score, including weighted subfolders. Current
+            drops lowest graded tasks; maximum drops lowest entered grades; minimum drops ungraded tasks first.</span>
+        </div>
+        <div class="form-group">
+          <label class="folder-bonus-cap-toggle" for="folderBonusCap">
+            <input type="checkbox" id="folderBonusCap">
+            Treat this folder's weight as a bonus cap
+          </label>
+          <span class="form-hint">Use this for an extra-credit-only category. Its score is based on the earned fraction of this folder's weight, up to 100% of that weight.</span>
         </div>
         <div class="form-group">
           <label for="folderDesc">Description</label>

@@ -537,6 +537,24 @@ body {
   margin-bottom: 0.9rem;
 }
 
+#taskImportCourseNameGroup[hidden],
+#learningSuiteImportInstructions[hidden],
+#taskImportUpdateMatchesGroup[hidden] {
+  display: none !important;
+}
+
+.transfer-import-option {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.75rem 0;
+}
+
+.transfer-import-option input {
+  width: auto;
+  margin: 0;
+}
+
 .transfer-export-row {
   align-items: end;
 }
@@ -786,6 +804,26 @@ body {
   border-bottom: 1px solid var(--border-color);
 }
 
+.folder-header-row[draggable="true"] {
+  cursor: grab;
+}
+
+.folder-node.dragging {
+  opacity: 0.58;
+  filter: saturate(0.65);
+  cursor: grabbing;
+}
+
+.folder-node.folder-drop-before > .folder-header-row {
+  background: var(--tag-bg);
+  box-shadow: inset 0 4px 0 var(--accent), 0 0 0 2px var(--accent);
+}
+
+.folder-node.folder-drop-after > .folder-header-row {
+  background: var(--tag-bg);
+  box-shadow: inset 0 -4px 0 var(--accent), 0 0 0 2px var(--accent);
+}
+
 .folder-title-left {
   display: flex;
   align-items: center;
@@ -859,6 +897,30 @@ body {
   transform: translateX(2px);
 }
 
+.tree-task-row[draggable="true"] {
+  cursor: grab;
+}
+
+.tree-task-row.dragging {
+  opacity: 0.58;
+  filter: saturate(0.65);
+  cursor: grabbing;
+}
+
+.tree-task-row.drop-before {
+  background: var(--tag-bg);
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+  box-shadow: inset 0 4px 0 var(--accent);
+}
+
+.tree-task-row.drop-after {
+  background: var(--tag-bg);
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+  box-shadow: inset 0 -4px 0 var(--accent);
+}
+
 .tree-task-main {
   display: flex;
   align-items: center;
@@ -915,6 +977,7 @@ body {
 .kanban-column.drag-over {
   border-color: var(--accent-color, var(--accent-2));
   background-color: var(--tag-bg);
+  box-shadow: inset 0 0 0 2px var(--accent-color, var(--accent-2));
 }
 
 .column-header {
@@ -961,8 +1024,9 @@ body {
 }
 
 .kanban-status-bucket.drag-over {
-  border-color: var(--accent-2);
-  background: var(--surface-highlight);
+  border: 2px dashed var(--accent-2);
+  background: var(--tag-bg);
+  box-shadow: inset 0 0 0 1px var(--accent-2);
 }
 
 .kanban-status-bucket-header {
@@ -1003,16 +1067,23 @@ body {
 }
 
 .task-card.dragging {
-  opacity: 0.45;
+  opacity: 0.58;
   cursor: grabbing;
+  filter: saturate(0.65);
 }
 
 .task-card.drop-before {
-  box-shadow: 0 -3px 0 var(--accent) inset;
+  background: var(--tag-bg);
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+  box-shadow: inset 0 4px 0 var(--accent);
 }
 
 .task-card.drop-after {
-  box-shadow: 0 3px 0 var(--accent) inset;
+  background: var(--tag-bg);
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+  box-shadow: inset 0 -4px 0 var(--accent);
 }
 
 .task-card:hover {
@@ -1245,15 +1316,23 @@ body {
 }
 
 .task-table tbody tr.dragging {
-  opacity: 0.45;
+  opacity: 0.58;
+  cursor: grabbing;
+  filter: saturate(0.65);
 }
 
 .task-table tbody tr.drop-before {
-  box-shadow: inset 0 3px 0 var(--accent);
+  background: var(--tag-bg);
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  box-shadow: inset 0 4px 0 var(--accent);
 }
 
 .task-table tbody tr.drop-after {
-  box-shadow: inset 0 -3px 0 var(--accent);
+  background: var(--tag-bg);
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  box-shadow: inset 0 -4px 0 var(--accent);
 }
 
 /* Gantt Chart View */
@@ -1529,17 +1608,25 @@ body {
 
 .gantt-sidebar-cell.dragging,
 .gantt-bar-item.dragging {
-  opacity: 0.45;
+  opacity: 0.58;
+  filter: saturate(0.65);
+  cursor: grabbing;
 }
 
 .gantt-sidebar-cell.drop-before,
 .gantt-row.drop-before {
-  box-shadow: inset 0 3px 0 var(--accent);
+  background-color: var(--tag-bg);
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  box-shadow: inset 0 4px 0 var(--accent);
 }
 
 .gantt-sidebar-cell.drop-after,
 .gantt-row.drop-after {
-  box-shadow: inset 0 -3px 0 var(--accent);
+  background-color: var(--tag-bg);
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  box-shadow: inset 0 -4px 0 var(--accent);
 }
 
 .gantt-bar-item {
@@ -1696,6 +1783,19 @@ body {
 }
 
 .form-checkbox-group input[type="checkbox"] {
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.folder-bonus-cap-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+}
+
+.folder-bonus-cap-toggle input[type="checkbox"] {
+  width: auto;
   margin: 0;
   accent-color: var(--accent);
 }

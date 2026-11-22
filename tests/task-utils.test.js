@@ -391,6 +391,27 @@ test('extra credit adds bonus points without lowering a folder when unearned', (
   assert.equal(unearnedProjection.minGrade, 100);
 });
 
+test('bonus-cap folders add only their folder weight and give no unearned current or minimum credit', () => {
+  const bonusFolders = [
+    { id: 'course', name: 'Course', parent_id: null, weight_percent: 0 },
+    { id: 'evaluations', name: 'Evaluations', parent_id: 'course', weight_percent: 2, bonus_cap_enabled: true },
+  ];
+  const bonusTask = {
+    id: 'rating', folder_id: 'evaluations', extra_credit: true, weight_override: 1,
+    earned_points: null, max_points: 100, grade: null,
+  };
+
+  const unearned = folderTreeGradePotential('course', bonusFolders, [bonusTask]);
+  assert.equal(unearned.average, 0);
+  assert.equal(unearned.maxAverage, 2);
+  assert.equal(unearned.minAverage, 0);
+
+  const earned = folderTreeGradePotential('course', bonusFolders, [{ ...bonusTask, earned_points: 100 }]);
+  assert.equal(earned.average, 2);
+  assert.equal(earned.maxAverage, 2);
+  assert.equal(earned.minAverage, 2);
+});
+
 test('current grade sums weighted course points and allows extra credit above 100 percent', () => {
   const weightedPoints = weightedGradeContribution(5, 100)
     + weightedGradeContribution(100, 25)

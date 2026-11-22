@@ -241,7 +241,15 @@ export function ganttDependencyPath(fromX, fromY, toX, toY) {
 export function taskCustomFieldEntries(task, fields) {
   return fields
     .filter(field => task.custom_values?.[field.id] != null && task.custom_values[field.id] !== '')
-    .map(field => ({ name: field.name, value: task.custom_values[field.id] }));
+    .map(field => ({ name: field.name, value: formatCustomFieldValue(field, task.custom_values[field.id]) }));
+}
+
+export function formatCustomFieldValue(field, value) {
+  if (/\bgrade\s*weight\b/i.test(String(field?.name || ''))) {
+    const number = Number(value);
+    if (Number.isFinite(number)) return String(Math.trunc(number * 100) / 100);
+  }
+  return value;
 }
 
 export function tasksInFolderTree(folderId, folders, tasks) {
@@ -433,6 +441,40 @@ function inputTaskScore(task) {
   return null;
 }
 
+function bonusFolderScore(folderId, folders, tasks, customWeightFieldId, scenario) {
+  const bonusTasks = tasksInFolderSubtree(folderId, folders, tasks).filter(task => task.extra_credit);
+  let totalWeight = 0;
+  let earnedWeight = 0;
+
+  for (const task of bonusTasks) {
+    const override = task.weight_override;
+    const customWeight = customWeightFieldId ? task.custom_values?.[customWeightFieldId] : undefined;
+    const rawWeight = override !== null && override !== undefined && override !== ''
+      ? override
+      : customWeight !== null && customWeight !== undefined && customWeight !== ''
+        ? customWeight
+        : Number(task.max_points) > 0 ? task.max_points : 1;
+    const weight = Number(rawWeight);
+    if (!Number.isFinite(weight) || weight <= 0) continue;
+    totalWeight += weight;
+
+    let fraction = null;
+    if (task.grade !== null && task.grade !== undefined && task.grade !== '') {
+      fraction = Number(task.grade) / 100;
+    } else if (task.earned_points !== null && task.earned_points !== undefined
+      && Number(task.max_points) > 0) {
+      fraction = Number(task.earned_points) / Number(task.max_points);
+    }
+    if (fraction !== null && Number.isFinite(fraction)) {
+      earnedWeight += weight * Math.max(0, Math.min(1, fraction));
+    } else if (scenario === 'maximum') {
+      earnedWeight += weight;
+    }
+  }
+
+  return totalWeight > 0 ? (earnedWeight / totalWeight) * 100 : 0;
+}
+
 function tasksDroppedForScenario(tasks, count, scenario) {
   const eligible = scenario === 'minimum'
     ? tasks
@@ -464,6 +506,12 @@ function folderTreeScenario(folderId, folders, tasks, customWeightFieldId, scena
   const contributingTasks = folderContributingTasks(folderId, folders, tasks, new Set(), customWeightFieldId);
   const ownDropped = tasksDroppedForScenario(contributingTasks, folder.drop_lowest_count, scenario);
   const remainingTasks = ownDropped.size ? tasks.filter(task => !ownDropped.has(task.id)) : tasks;
+  if (folder.bonus_cap_enabled) {
+    return {
+      score: bonusFolderScore(folderId, folders, remainingTasks, customWeightFieldId, scenario),
+      droppedTaskIds: ownDropped
+    };
+  }
   if (ownDropped.size && contributingTasks.length > 0 && contributingTasks.every(task => ownDropped.has(task.id))) {
     return { score: 100, droppedTaskIds: ownDropped };
   }

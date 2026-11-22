@@ -196,6 +196,8 @@ async function initTables(db) {
       description TEXT DEFAULT '',
       color TEXT DEFAULT '',
       weight_percent REAL DEFAULT 0,
+      sort_order INTEGER DEFAULT NULL,
+      bonus_cap_enabled INTEGER NOT NULL DEFAULT 0,
       drop_lowest_count INTEGER NOT NULL DEFAULT 0,
       target_grade REAL DEFAULT 100,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -272,6 +274,8 @@ async function initTables(db) {
     ['projects', 'holidays_json', "TEXT NOT NULL DEFAULT '[]'"],
     ['projects', 'status_options_json', `TEXT NOT NULL DEFAULT '{"todo":[],"in_progress":[],"done":[]}'`],
     ['folders', 'drop_lowest_count', 'INTEGER NOT NULL DEFAULT 0'],
+    ['folders', 'sort_order', 'INTEGER DEFAULT NULL'],
+    ['folders', 'bonus_cap_enabled', 'INTEGER NOT NULL DEFAULT 0'],
     ['tasks', 'extra_credit', 'INTEGER NOT NULL DEFAULT 0'],
     ['tasks', 'start_time', 'TEXT'],
     ['tasks', 'due_time', 'TEXT'],
@@ -744,8 +748,44 @@ app.get('/api/projects/:id/folders', async (c) => {
   const access = await getProjectAccessLevel(db, projectId, user);
   if (!verifyProjectPermission(access, 'view')) return c.json({ error: 'Access denied' }, 403);
 
-  const { results } = await db.prepare('SELECT * FROM folders WHERE project_id = ? ORDER BY created_at ASC').bind(projectId).all();
+  const { results } = await db.prepare(`
+    SELECT * FROM folders WHERE project_id = ?
+    ORDER BY CASE WHEN sort_order IS NULL THEN 1 ELSE 0 END, sort_order ASC, created_at ASC
+  `).bind(projectId).all();
   return c.json(results || []);
+});
+
+app.patch('/api/projects/:id/folders/order', async (c) => {
+  const user = await getAuthenticatedUser(c);
+  if (!user) return c.json({ error: 'Authentication required' }, 401);
+
+  const db = c.env.DB;
+  const projectId = c.req.param('id');
+  const access = await getProjectAccessLevel(db, projectId, user);
+  if (!verifyProjectPermission(access, 'edit')) return c.json({ error: 'Requires edit permission on project' }, 403);
+
+  let body;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON payload' }, 400); }
+  const parentId = body?.parent_id || null;
+  const folderIds = body?.folder_ids;
+  if (!Array.isArray(folderIds) || folderIds.length === 0 || folderIds.some(id => typeof id !== 'string' || !id)
+    || new Set(folderIds).size !== folderIds.length) {
+    return c.json({ error: 'folder_ids must be a non-empty array of unique folder IDs.' }, 400);
+  }
+
+  const { results: projectFolders } = await db.prepare('SELECT id, parent_id FROM folders WHERE project_id = ?').bind(projectId).all();
+  const existingIds = new Set((projectFolders || []).filter(folder => (folder.parent_id || null) === parentId).map(folder => folder.id));
+  if (parentId && !(projectFolders || []).some(folder => folder.id === parentId)) {
+    return c.json({ error: 'Parent folder must belong to this project.' }, 400);
+  }
+  if (folderIds.length !== existingIds.size || folderIds.some(id => !existingIds.has(id))) {
+    return c.json({ error: 'folder_ids must include every sibling folder exactly once.' }, 400);
+  }
+
+  await db.batch(folderIds.map((id, index) => db.prepare(
+    'UPDATE folders SET sort_order = ? WHERE id = ? AND project_id = ?'
+  ).bind(index, id, projectId)));
+  return c.json({ success: true });
 });
 
 app.post('/api/projects/:id/folders', async (c) => {
@@ -768,13 +808,15 @@ app.post('/api/projects/:id/folders', async (c) => {
   const requestedDropLowest = Number(body.drop_lowest_count);
   const drop_lowest_count = Number.isFinite(requestedDropLowest) ? Math.max(0, Math.floor(requestedDropLowest)) : 0;
   const target_grade = Number(body.target_grade) || 100;
+  const bonus_cap_enabled = body.bonus_cap_enabled === true || body.bonus_cap_enabled === 1
+    || body.bonus_cap_enabled === '1' || body.bonus_cap_enabled === 'true' ? 1 : 0;
 
   await db.prepare(`
-    INSERT INTO folders (id, project_id, parent_id, name, description, color, weight_percent, drop_lowest_count, target_grade)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).bind(id, projectId, parent_id, name, description, color, weight_percent, drop_lowest_count, target_grade).run();
+    INSERT INTO folders (id, project_id, parent_id, name, description, color, weight_percent, drop_lowest_count, target_grade, bonus_cap_enabled)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(id, projectId, parent_id, name, description, color, weight_percent, drop_lowest_count, target_grade, bonus_cap_enabled).run();
 
-  return c.json({ id, project_id: projectId, parent_id, name, description, color, weight_percent, drop_lowest_count, target_grade }, 201);
+  return c.json({ id, project_id: projectId, parent_id, name, description, color, weight_percent, drop_lowest_count, target_grade, bonus_cap_enabled }, 201);
 });
 
 app.put('/api/folders/:id', async (c) => {
@@ -783,7 +825,7 @@ app.put('/api/folders/:id', async (c) => {
 
   const db = c.env.DB;
   const id = c.req.param('id');
-  const folder = await db.prepare('SELECT project_id FROM folders WHERE id = ?').bind(id).first();
+  const folder = await db.prepare('SELECT project_id, parent_id, bonus_cap_enabled FROM folders WHERE id = ?').bind(id).first();
   if (!folder) return c.json({ error: 'Folder not found' }, 404);
 
   const access = await getProjectAccessLevel(db, folder.project_id, user);
@@ -799,6 +841,10 @@ app.put('/api/folders/:id', async (c) => {
   const requestedDropLowest = Number(body.drop_lowest_count);
   const drop_lowest_count = Number.isFinite(requestedDropLowest) ? Math.max(0, Math.floor(requestedDropLowest)) : 0;
   const target_grade = Number(body.target_grade) || 100;
+  const bonus_cap_enabled = body.bonus_cap_enabled === undefined
+    ? Number(folder.bonus_cap_enabled) || 0
+    : body.bonus_cap_enabled === true || body.bonus_cap_enabled === 1
+      || body.bonus_cap_enabled === '1' || body.bonus_cap_enabled === 'true' ? 1 : 0;
 
   if (parent_id === id) {
     return c.json({ error: 'A folder cannot be its own parent' }, 400);
@@ -820,9 +866,10 @@ app.put('/api/folders/:id', async (c) => {
 
   await db.prepare(`
     UPDATE folders
-    SET name = ?, parent_id = ?, description = ?, color = ?, weight_percent = ?, drop_lowest_count = ?, target_grade = ?
+    SET name = ?, parent_id = ?, description = ?, color = ?, weight_percent = ?, drop_lowest_count = ?, target_grade = ?, bonus_cap_enabled = ?,
+        sort_order = CASE WHEN parent_id IS NOT ? THEN NULL ELSE sort_order END
     WHERE id = ?
-  `).bind(name, parent_id, description, color, weight_percent, drop_lowest_count, target_grade, id).run();
+  `).bind(name, parent_id, description, color, weight_percent, drop_lowest_count, target_grade, bonus_cap_enabled, parent_id, id).run();
 
   return c.json({ success: true });
 });

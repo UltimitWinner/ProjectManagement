@@ -1,5 +1,6 @@
-import { sortTasks, excludeDoneTasks, buildGanttDependencyEdges, ganttDependencyPath, taskCustomFieldEntries, getFolderPath, buildGanttRows, buildGanttWeekRanges, taskGanttDateRange, ganttTimeOffset, ganttCalendarDaysBetween, folderTreeGradePotential, pointsGradeProjection, weightedGradeContribution, currentGradeWithUngradedFolderDefault, tasksInFolderTree, tasksInFolderSubtree } from './task-utils.js';
+import { sortTasks, excludeDoneTasks, buildGanttDependencyEdges, ganttDependencyPath, taskCustomFieldEntries, formatCustomFieldValue, getFolderPath, buildGanttRows, buildGanttWeekRanges, taskGanttDateRange, ganttTimeOffset, ganttCalendarDaysBetween, folderTreeGradePotential, pointsGradeProjection, weightedGradeContribution, currentGradeWithUngradedFolderDefault, tasksInFolderTree, tasksInFolderSubtree } from './task-utils.js';
 import { parseCsv, serializeCsv, detectCsvProfile, normalizeImportRow, normalizeHeader, getCsvProfile, parseTransferDateValue, parseTransferTimeValue } from './transfer-utils.js';
+import { parseLearningSuiteHtml, previewLearningSuiteMatches, normalizeTaskMatchTitle } from './learning-suite-utils.js';
 
 // State
 let currentUser = null; // { id, username, name, systemRole }
@@ -172,6 +173,8 @@ function setupEventListeners() {
   document.getElementById('btnImportTasks').addEventListener('click', importTasks);
   document.getElementById('taskImportFile').addEventListener('change', previewTaskImport);
   document.getElementById('taskImportFormat').addEventListener('change', previewTaskImport);
+  document.getElementById('taskImportCourseName').addEventListener('input', previewTaskImport);
+  document.getElementById('taskImportUpdateMatches').addEventListener('change', previewTaskImport);
   document.getElementById('exportGanttSvg').addEventListener('click', exportGanttSvg);
   const ganttSidebar = document.getElementById('ganttSidebarCol');
   const ganttChart = document.getElementById('ganttChartArea');
@@ -367,6 +370,7 @@ async function persistTaskOrder(taskIds, statuses = {}, statusLabels = {}) {
     if (Object.hasOwn(statuses, task.id)) task.status = statuses[task.id];
     if (Object.hasOwn(statusLabels, task.id)) task.status_label = statusLabels[task.id];
   });
+  tasks.sort((a, b) => Number(a.sort_order) - Number(b.sort_order));
   listSortState = [{ key: 'manual_order', dir: 'asc' }];
   saveListPreferences();
   renderCurrentView();
@@ -432,6 +436,26 @@ function saveCollapsedFolders() {
   } catch {
     // The current session still uses the selected collapsed state if storage is unavailable.
   }
+}
+
+function learningSuiteSyncMapKey(courseId) {
+  return `myplan_learning_suite_sync_${currentProjectId || 'none'}_${String(courseId || 'unknown')}`;
+}
+
+function loadLearningSuiteSyncMap(courseId) {
+  try {
+    const saved = JSON.parse(localStorage.getItem(learningSuiteSyncMapKey(courseId)) || '{}');
+    return {
+      folders: saved.folders && typeof saved.folders === 'object' ? saved.folders : {},
+      tasks: saved.tasks && typeof saved.tasks === 'object' ? saved.tasks : {}
+    };
+  } catch {
+    return { folders: {}, tasks: {} };
+  }
+}
+
+function saveLearningSuiteSyncMap(courseId, map) {
+  try { localStorage.setItem(learningSuiteSyncMapKey(courseId), JSON.stringify(map)); } catch {}
 }
 
 function clearGanttDropMarkers(clearDragging = true) {
@@ -961,6 +985,12 @@ function openDataTransferModal(selectedOnly = false) {
   exportSelectedOnly = Boolean(selectedOnly);
   pendingImport = null;
   document.getElementById('taskImportFile').value = '';
+  document.getElementById('taskImportFormat').value = 'auto';
+  document.getElementById('taskImportCourseName').value = '';
+  document.getElementById('taskImportCourseNameGroup').hidden = true;
+  document.getElementById('learningSuiteImportInstructions').hidden = true;
+  document.getElementById('taskImportUpdateMatchesGroup').hidden = true;
+  document.getElementById('taskImportUpdateMatches').checked = true;
   document.getElementById('taskImportPreview').textContent = 'Choose a file to preview its rows.';
   document.getElementById('btnImportTasks').disabled = true;
   document.getElementById('btnExportTasks').textContent = exportSelectedOnly ? 'Download selected tasks' : 'Download tasks';
@@ -1091,15 +1121,43 @@ function previewTaskImport() {
   const file = document.getElementById('taskImportFile').files[0];
   const preview = document.getElementById('taskImportPreview');
   const importButton = document.getElementById('btnImportTasks');
+  const chosenFormat = document.getElementById('taskImportFormat').value;
+  const isLearningSuiteFile = chosenFormat === 'learning_suite_html' || file?.name.toLowerCase().endsWith('.html');
+  document.getElementById('taskImportCourseNameGroup').hidden = !isLearningSuiteFile;
+  document.getElementById('learningSuiteImportInstructions').hidden = !isLearningSuiteFile;
+  document.getElementById('taskImportUpdateMatchesGroup').hidden = !isLearningSuiteFile;
   pendingImport = null;
   importButton.disabled = true;
   if (!file) { preview.textContent = 'Choose a file to preview its rows.'; return; }
+  if (file.name.toLowerCase().endsWith('.html')) document.getElementById('taskImportFormat').value = 'learning_suite_html';
 
   const reader = new FileReader();
   reader.onload = () => {
     const content = String(reader.result || '');
     try {
-      if (file.name.toLowerCase().endsWith('.json') || content.trimStart().startsWith('{')) {
+      if (chosenFormat === 'learning_suite_html' || file.name.toLowerCase().endsWith('.html')) {
+        const courseNameField = document.getElementById('taskImportCourseName');
+        const parsed = parseLearningSuiteHtml(content, courseNameField.value);
+        if (!courseNameField.value) courseNameField.value = parsed.courseName;
+        const mergePreview = previewLearningSuiteMatches(
+          parsed.backup,
+          folders,
+          tasks,
+          loadLearningSuiteSyncMap(parsed.courseId)
+        );
+        pendingImport = {
+          type: 'learning_suite_html', data: parsed.backup,
+          count: parsed.backup.tasks.length, skipped: 0, mergePreview
+        };
+        const mergeEnabled = document.getElementById('taskImportUpdateMatches').checked;
+        const updates = mergeEnabled ? mergePreview.updated : 0;
+        const adds = mergeEnabled ? mergePreview.added : parsed.backup.tasks.length;
+        const ambiguous = mergeEnabled ? mergePreview.ambiguous : 0;
+        const existingCategories = parsed.backup.folders.filter(folder => folder.parent_id && mergePreview.matchedFolders.has(folder.id)).length;
+        const categoryCount = parsed.backup.folders.filter(folder => folder.parent_id).length;
+        const newCategories = Math.max(0, categoryCount - existingCategories);
+        preview.textContent = `BYU Learning Suite: ${parsed.backup.tasks.length} assignments, ${parsed.backup.folders.length - 1} categories, ${parsed.gradedCount} graded. Ready to add ${adds} and update ${updates} matching task(s); ${newCategories} category folder(s) will be added and ${existingCategories} refreshed. ${ambiguous} ambiguous title match(es) will be skipped.`;
+      } else if (file.name.toLowerCase().endsWith('.json') || content.trimStart().startsWith('{')) {
         const backup = JSON.parse(content);
         const rows = Array.isArray(backup) ? backup : backup.tasks;
         if (!Array.isArray(rows)) throw new Error('The JSON file does not contain a tasks array.');
@@ -1123,9 +1181,13 @@ function previewTaskImport() {
         const sample = validRows.slice(0, 5).map(row => row.title).join(' · ');
         preview.textContent = `${profileLabel(profile)} CSV: ${validRows.length} task(s) ready; ${skipped} row(s) without a task name will be skipped. ${unknown.length} custom column(s): ${unknown.map(header => header.replace(/^custom\s*:\s*/i, '')).join(', ') || 'none'}.${sample ? ` Sample: ${sample}` : ''}`;
       }
-      importButton.disabled = !pendingImport.count || currentProjectAccess !== 'edit';
+      const missingCourseName = isLearningSuiteFile && !document.getElementById('taskImportCourseName').value.trim();
+      importButton.disabled = !pendingImport.count || currentProjectAccess !== 'edit' || missingCourseName;
     } catch (error) {
-      preview.textContent = `Could not read this file: ${error.message}`;
+      const needsCourseName = isLearningSuiteFile && /does not show the course name/i.test(error.message);
+      preview.textContent = needsCourseName
+        ? 'This saved page does not show a readable course name. Enter the course name above, then preview again.'
+        : `Could not read this file: ${error.message}`;
       pendingImport = null;
     }
   };
@@ -1307,8 +1369,15 @@ async function importTasks() {
   const preview = document.getElementById('taskImportPreview');
   button.disabled = true;
   let createdCount = 0;
+  let updatedCount = 0;
+  let updatedFolderCount = 0;
+  let ambiguousCount = 0;
   try {
     const data = pendingImport;
+    const isLearningSuite = data.type === 'learning_suite_html';
+    const updateMatches = isLearningSuite && document.getElementById('taskImportUpdateMatches').checked;
+    const learningSuiteCourseId = data.data?.source?.course_id || 'unknown';
+    const syncMap = isLearningSuite ? loadLearningSuiteSyncMap(learningSuiteCourseId) : null;
     let normalizedRows = [];
     let folderSourceMap = new Map();
     let customValueIds = {};
@@ -1331,20 +1400,44 @@ async function importTasks() {
       const sourceFolders = backup.folders || [];
       for (const folder of [...sourceFolders].sort((a, b) => folderDepth(a, sourceFolders) - folderDepth(b, sourceFolders))) {
         const parentId = folder.parent_id ? folderSourceMap.get(folder.parent_id) || null : null;
-        const match = folders.find(item => item.parent_id === parentId && item.name.toLowerCase() === String(folder.name).toLowerCase());
+        const mappedId = isLearningSuite ? syncMap.folders[folder.id] : null;
+        let match = mappedId ? folders.find(item => item.id === mappedId && item.parent_id === parentId) : null;
+        if (!match) match = folders.find(item => item.parent_id === parentId && item.name.toLowerCase() === String(folder.name).toLowerCase());
         let id = match?.id;
         if (!id) {
           const made = await api(`/api/projects/${currentProjectId}/folders`, {
             method: 'POST', body: JSON.stringify({
               name: folder.name, parent_id: parentId, description: folder.description || '', color: folder.color || '',
               weight_percent: Number(folder.weight_percent) || 0, drop_lowest_count: Number(folder.drop_lowest_count) || 0,
-              target_grade: Number(folder.target_grade) || 100
+              target_grade: Number(folder.target_grade) || 100,
+              bonus_cap_enabled: Boolean(folder.bonus_cap_enabled)
             })
           });
           folders.push(made); id = made.id;
+        } else if (isLearningSuite) {
+          const isCourseRoot = !folder.parent_id;
+          const nextWeight = isCourseRoot ? (Number(match.weight_percent) || 0) : (Number(folder.weight_percent) || 0);
+          const nextDropLowest = isCourseRoot ? (Number(match.drop_lowest_count) || 0) : (Number(folder.drop_lowest_count) || 0);
+          const nextName = String(folder.name || match.name);
+          const nextBonusCap = isCourseRoot ? Boolean(match.bonus_cap_enabled) : Boolean(folder.bonus_cap_enabled);
+          if (match.name !== nextName || Number(match.weight_percent) !== nextWeight
+            || Number(match.drop_lowest_count) !== nextDropLowest || Boolean(match.bonus_cap_enabled) !== nextBonusCap) {
+            await api(`/api/folders/${match.id}`, {
+              method: 'PUT',
+              body: JSON.stringify({
+                name: nextName, parent_id: parentId, description: match.description || '', color: match.color || '',
+                weight_percent: nextWeight, drop_lowest_count: nextDropLowest, target_grade: Number(match.target_grade) || 100,
+                bonus_cap_enabled: nextBonusCap
+              })
+            });
+            Object.assign(match, { name: nextName, weight_percent: nextWeight, drop_lowest_count: nextDropLowest, bonus_cap_enabled: nextBonusCap });
+            updatedFolderCount += 1;
+          }
         }
         folderSourceMap.set(folder.id, id);
+        if (isLearningSuite) syncMap.folders[folder.id] = id;
       }
+      if (isLearningSuite) saveLearningSuiteSyncMap(learningSuiteCourseId, syncMap);
       const sourceTasks = Array.isArray(backup) ? backup : (backup.tasks || []);
       normalizedRows = sourceTasks.map(task => ({
         ...task,
@@ -1359,9 +1452,10 @@ async function importTasks() {
     const folderCache = [...folders];
     const sourceTaskIdMap = new Map();
     const tasksToLink = [];
+    const claimedExistingTaskIds = new Set();
     for (const row of normalizedRows) {
       const path = row.folder_path || row.folder || row.bucket_name || row.bucket || row.group || row.list_name || row.list || '';
-      const folderId = data.type === 'json' && row.folder_id
+      const folderId = data.type !== 'csv' && row.folder_id
         ? folderSourceMap.get(row.folder_id) || ''
         : await getOrCreateImportFolder(path, folderCache);
       let payload;
@@ -1387,12 +1481,56 @@ async function importTasks() {
       } else {
         payload = makeTaskImportPayload(row, data.profile, folderId, customValueIds);
       }
-      const created = await api(`/api/projects/${currentProjectId}/tasks`, { method: 'POST', body: JSON.stringify(payload) });
-      createdCount += 1;
       const sourceId = row._sourceId || payload._sourceId || row.id;
-      if (sourceId) sourceTaskIdMap.set(String(sourceId), created.id);
-      tasksToLink.push({ id: created.id, payload, sourceDependencies: row._sourceDependencies || payload._sourceDependencies || [] });
-      preview.textContent = `Imported ${createdCount} of ${normalizedRows.length} tasks…`;
+      let existing = null;
+      if (isLearningSuite && updateMatches) {
+        const mappedTaskId = syncMap.tasks[String(sourceId || '')];
+        existing = tasks.find(task => task.id === mappedTaskId && !claimedExistingTaskIds.has(task.id)) || null;
+        if (!existing) {
+          const candidates = tasks.filter(task => !claimedExistingTaskIds.has(task.id)
+            && task.folder_id === folderId
+            && normalizeTaskMatchTitle(task.title) === normalizeTaskMatchTitle(payload.title));
+          if (candidates.length === 1) existing = candidates[0];
+          else if (candidates.length > 1) {
+            ambiguousCount += 1;
+            continue;
+          }
+        }
+      }
+
+      if (existing) {
+        claimedExistingTaskIds.add(existing.id);
+        const hasGrade = row.earned_points !== null && row.earned_points !== undefined;
+        const updatePayload = {
+          ...payload,
+          description: payload.description || existing.description || '',
+          status: hasGrade ? 'done' : existing.status,
+          status_label: existing.status_label || '',
+          priority: existing.priority || payload.priority,
+          start_date: payload.start_date || null,
+          start_time: payload.start_time || null,
+          due_date: payload.due_date || null,
+          due_time: payload.due_time || null,
+          open_at: existing.open_at || null,
+          progress: hasGrade ? 100 : (Number(existing.progress) || 0),
+          color: existing.color || '',
+          custom_values: { ...(existing.custom_values || {}), ...(payload.custom_values || {}) },
+          dependencies: existing.dependencies || []
+        };
+        await api(`/api/tasks/${existing.id}`, { method: 'PUT', body: JSON.stringify(updatePayload) });
+        updatedCount += 1;
+        if (sourceId) syncMap.tasks[String(sourceId)] = existing.id;
+      } else {
+        const created = await api(`/api/projects/${currentProjectId}/tasks`, { method: 'POST', body: JSON.stringify(payload) });
+        createdCount += 1;
+        if (sourceId) {
+          sourceTaskIdMap.set(String(sourceId), created.id);
+          if (isLearningSuite) syncMap.tasks[String(sourceId)] = created.id;
+        }
+        tasksToLink.push({ id: created.id, payload, sourceDependencies: row._sourceDependencies || payload._sourceDependencies || [] });
+      }
+      if (isLearningSuite) saveLearningSuiteSyncMap(learningSuiteCourseId, syncMap);
+      preview.textContent = `Processed ${createdCount + updatedCount} of ${normalizedRows.length} assignments (${createdCount} added, ${updatedCount} updated).`;
     }
 
     for (const item of tasksToLink) {
@@ -1404,11 +1542,13 @@ async function importTasks() {
     await loadFolders();
     await loadCustomFields();
     await loadTasks();
-    preview.textContent = `Import complete: ${createdCount} task(s) added. ${data.skipped || 0} nameless row(s) were skipped.`;
+    preview.textContent = isLearningSuite
+      ? `Learning Suite import complete: ${createdCount} task(s) added, ${updatedCount} updated, ${updatedFolderCount} category folder(s) refreshed${ambiguousCount ? `, ${ambiguousCount} ambiguous match(es) skipped` : ''}.`
+      : `Import complete: ${createdCount} task(s) added. ${data.skipped || 0} nameless row(s) were skipped.`;
     pendingImport = null;
     setTimeout(closeDataTransferModal, 900);
   } catch (error) {
-    preview.textContent = `Import stopped after ${createdCount} task(s): ${error.message}. Imported items remain in the project; fix the file or retry the remaining rows after removing the completed ones.`;
+    preview.textContent = `Import stopped after ${createdCount + updatedCount} task(s): ${error.message}. Completed adds and updates remain in the project; preview and retry the remaining items.`;
   } finally {
     button.disabled = currentProjectAccess !== 'edit' || !pendingImport;
   }
@@ -1636,7 +1776,10 @@ function renderFolderNode(folder, depth, gradeData) {
 
   const folderStats = gradeData.folderStats.get(folder.id) || { avg: '--', earnedRate: 0, weight: folder.weight_percent, totalCount: folderTasks.length };
 
-  const weightBadge = folder.weight_percent > 0 ? `<span class="badge badge-custom">${folder.weight_percent}% weight</span>` : '';
+  const showFolderWeight = Number(folder.weight_percent) > 0 || depth > 0;
+  const weightBadge = showFolderWeight
+    ? `<span class="badge badge-custom">${escapeHtml(formatCustomFieldValue({ name: 'Grade Weight %' }, Number(folder.weight_percent) || 0))}% ${folder.bonus_cap_enabled ? 'bonus cap' : 'weight'}</span>`
+    : '';
   const dropLowestBadge = Number(folder.drop_lowest_count) > 0
     ? `<span class="badge badge-custom">Drops ${Number(folder.drop_lowest_count)} lowest</span>` : '';
   const gradeBadge = folderStats.avg !== '--' ? `<span class="badge badge-grade">Score: ${folderStats.avg}%</span>` : '';
@@ -1673,6 +1816,7 @@ function renderFolderNode(folder, depth, gradeData) {
   `;
 
   // Wire buttons via addEventListener (required — CSP blocks inline onclick)
+  installFolderReorderHandlers(node.querySelector('.folder-header-row'), folder);
   const contentArea = node.querySelector('.folder-content-area');
   const collapseButton = node.querySelector('.folder-collapse-toggle');
   const initiallyCollapsed = collapsedFolderIds.has(folder.id);
@@ -1693,7 +1837,9 @@ function renderFolderNode(folder, depth, gradeData) {
 
   // Render direct tasks inside this folder
   folderTasks.forEach(task => {
-    contentArea.appendChild(createTaskTreeRow(task));
+    const taskRow = createTaskTreeRow(task);
+    installFolderTaskReorderHandlers(taskRow, task);
+    contentArea.appendChild(taskRow);
   });
 
   // Render nested subfolders recursively
@@ -1702,6 +1848,141 @@ function renderFolderNode(folder, depth, gradeData) {
   });
 
   return node;
+}
+
+function getFolderDepth(folderId) {
+  let depth = 0;
+  let current = folders.find(folder => folder.id === folderId);
+  const seen = new Set();
+  while (current?.parent_id && !seen.has(current.id)) {
+    seen.add(current.id);
+    current = folders.find(folder => folder.id === current.parent_id);
+    if (current) depth += 1;
+  }
+  return depth;
+}
+
+let activeFolderDragId = null;
+
+function installFolderReorderHandlers(header, folder) {
+  if (currentProjectAccess !== 'edit') return;
+  header.draggable = true;
+  header.addEventListener('dragstart', event => {
+    if (event.target.closest('button')) { event.preventDefault(); return; }
+    activeFolderDragId = folder.id;
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', folder.id);
+    header.closest('.folder-node')?.classList.add('dragging');
+  });
+  header.addEventListener('dragover', event => {
+    const draggedId = activeFolderDragId || event.dataTransfer?.getData('text/plain');
+    const draggedFolder = folders.find(item => item.id === draggedId);
+    if (!draggedFolder || draggedFolder.id === folder.id
+      || (draggedFolder.parent_id || null) !== (folder.parent_id || null)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    const node = header.closest('.folder-node');
+    node?.classList.remove('folder-drop-before', 'folder-drop-after');
+    const after = event.clientY >= header.getBoundingClientRect().top + header.offsetHeight / 2;
+    node?.classList.add(after ? 'folder-drop-after' : 'folder-drop-before');
+  });
+  header.addEventListener('dragleave', event => {
+    if (!header.contains(event.relatedTarget)) header.closest('.folder-node')?.classList.remove('folder-drop-before', 'folder-drop-after');
+  });
+  header.addEventListener('drop', async event => {
+    const draggedId = activeFolderDragId || event.dataTransfer?.getData('text/plain');
+    const draggedFolder = folders.find(item => item.id === draggedId);
+    if (!draggedFolder || draggedFolder.id === folder.id
+      || (draggedFolder.parent_id || null) !== (folder.parent_id || null)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const after = event.clientY >= header.getBoundingClientRect().top + header.offsetHeight / 2;
+    const ordered = folders.filter(item => (item.parent_id || null) === (folder.parent_id || null)).map(item => item.id);
+    ordered.splice(ordered.indexOf(draggedId), 1);
+    const targetIndex = ordered.indexOf(folder.id);
+    ordered.splice(targetIndex + (after ? 1 : 0), 0, draggedId);
+    activeFolderDragId = null;
+    document.querySelectorAll('.folder-node.dragging, .folder-node.folder-drop-before, .folder-node.folder-drop-after')
+      .forEach(item => item.classList.remove('dragging', 'folder-drop-before', 'folder-drop-after'));
+    try {
+      await persistFolderOrder(folder.parent_id || null, ordered);
+    } catch (error) {
+      alert(`Could not reorder folders: ${error.message}`);
+      renderCurrentView();
+    }
+  });
+  header.addEventListener('dragend', () => {
+    activeFolderDragId = null;
+    document.querySelectorAll('.folder-node.dragging, .folder-node.folder-drop-before, .folder-node.folder-drop-after')
+      .forEach(item => item.classList.remove('dragging', 'folder-drop-before', 'folder-drop-after'));
+  });
+}
+
+async function persistFolderOrder(parentId, folderIds) {
+  await api(`/api/projects/${currentProjectId}/folders/order`, {
+    method: 'PATCH',
+    body: JSON.stringify({ parent_id: parentId, folder_ids: folderIds })
+  });
+  const positionById = new Map(folderIds.map((id, index) => [id, index]));
+  folders.forEach(folder => {
+    if (positionById.has(folder.id)) folder.sort_order = positionById.get(folder.id);
+  });
+  await loadFolders();
+  renderCurrentView();
+}
+
+let activeFolderTaskDragId = null;
+
+function installFolderTaskReorderHandlers(row, task) {
+  if (currentProjectAccess !== 'edit' || !task.folder_id) return;
+  row.draggable = true;
+  row.addEventListener('dragstart', event => {
+    if (event.target.closest('button, input')) { event.preventDefault(); return; }
+    activeFolderTaskDragId = task.id;
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', task.id);
+    row.classList.add('dragging');
+  });
+  row.addEventListener('dragover', event => {
+    const draggedId = activeFolderTaskDragId || event.dataTransfer?.getData('text/plain');
+    const draggedTask = tasks.find(item => item.id === draggedId);
+    if (!draggedTask || draggedTask.id === task.id || draggedTask.folder_id !== task.folder_id) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    row.classList.remove('drop-before', 'drop-after');
+    const after = event.clientY >= row.getBoundingClientRect().top + row.offsetHeight / 2;
+    row.classList.add(after ? 'drop-after' : 'drop-before');
+  });
+  row.addEventListener('dragleave', event => {
+    if (!row.contains(event.relatedTarget)) row.classList.remove('drop-before', 'drop-after');
+  });
+  row.addEventListener('drop', async event => {
+    const draggedId = activeFolderTaskDragId || event.dataTransfer?.getData('text/plain');
+    const draggedTask = tasks.find(item => item.id === draggedId);
+    if (!draggedTask || draggedTask.id === task.id || draggedTask.folder_id !== task.folder_id) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const after = event.clientY >= row.getBoundingClientRect().top + row.offsetHeight / 2;
+    const siblingIds = tasks.filter(item => item.folder_id === task.folder_id).map(item => item.id);
+    siblingIds.splice(siblingIds.indexOf(draggedId), 1);
+    siblingIds.splice(siblingIds.indexOf(task.id) + (after ? 1 : 0), 0, draggedId);
+    const reorderedSiblings = new Set(siblingIds);
+    let nextSiblingIndex = 0;
+    const orderedTaskIds = tasks.map(item => reorderedSiblings.has(item.id) ? siblingIds[nextSiblingIndex++] : item.id);
+    activeFolderTaskDragId = null;
+    document.querySelectorAll('.tree-task-row.dragging, .tree-task-row.drop-before, .tree-task-row.drop-after')
+      .forEach(item => item.classList.remove('dragging', 'drop-before', 'drop-after'));
+    try {
+      await persistTaskOrder(orderedTaskIds);
+    } catch (error) {
+      alert(`Could not reorder tasks in this folder: ${error.message}`);
+      renderCurrentView();
+    }
+  });
+  row.addEventListener('dragend', () => {
+    activeFolderTaskDragId = null;
+    row.classList.remove('dragging', 'drop-before', 'drop-after');
+  });
 }
 
 function taskGradeScoreMarkup(task) {
@@ -2043,7 +2324,10 @@ function renderListView() {
       <td><strong class="list-grade-value">${gradeText}</strong></td>
       <td>${task.dependencies?.length ? `${task.dependencies.length} dependencies` : '-'}</td>
       <td>${task.progress}%</td>
-      ${customFields.map(f => `<td>${escapeHtml(task.custom_values?.[f.id] || '-')}</td>`).join('')}
+      ${customFields.map(f => {
+        const value = task.custom_values?.[f.id];
+        return `<td>${escapeHtml(value !== null && value !== undefined && value !== '' ? formatCustomFieldValue(f, value) : '-')}</td>`;
+      }).join('')}
       <td><button class="btn-secondary edit-required" style="padding:2px 8px;font-size:0.75rem;" data-action="edit-task">Edit</button></td>
     `;
 
@@ -2384,8 +2668,9 @@ function populateTaskFolderDropdown(selectedFolderId = '') {
   function addFolderOption(folder, depth) {
     const opt = document.createElement('option');
     opt.value = folder.id;
-    const indent = '  '.repeat(depth);
-    opt.textContent = `${indent}${folder.name}${folder.weight_percent > 0 ? ` (${folder.weight_percent}%)` : ''}`;
+    const indent = '\u00a0\u00a0'.repeat(depth);
+    const weightText = formatCustomFieldValue({ name: 'Grade Weight %' }, Number(folder.weight_percent) || 0);
+    opt.textContent = `${indent}${folder.name}${folder.weight_percent > 0 ? ` (${weightText}%)` : ''}`;
     if (folder.id === selectedFolderId) opt.selected = true;
     select.appendChild(opt);
 
@@ -2430,10 +2715,26 @@ function openTaskModal(task = null, presetFolderId = '') {
   // Populate dependencies
   const depSelect = document.getElementById('taskDependencies');
   depSelect.innerHTML = '';
-  tasks.filter(t => !task || t.id !== task.id).forEach(t => {
+  const folderRank = new Map();
+  let nextFolderRank = 0;
+  function rankFolders(parentId) {
+    folders.filter(folder => (folder.parent_id || null) === parentId).forEach(folder => {
+      folderRank.set(folder.id, nextFolderRank++);
+      rankFolders(folder.id);
+    });
+  }
+  rankFolders(null);
+  const originalTaskOrder = new Map(tasks.map((item, index) => [item.id, index]));
+  tasks.filter(t => !task || t.id !== task.id)
+    .sort((a, b) => (folderRank.get(a.folder_id) ?? Number.MAX_SAFE_INTEGER)
+      - (folderRank.get(b.folder_id) ?? Number.MAX_SAFE_INTEGER)
+      || originalTaskOrder.get(a.id) - originalTaskOrder.get(b.id))
+    .forEach(t => {
     const opt = document.createElement('option');
     opt.value = t.id;
-    opt.textContent = t.title;
+    const folderPath = t.folder_id ? getFolderPath(t.folder_id, folders) : 'Unfiled';
+    const indent = '\u00a0\u00a0'.repeat(getFolderDepth(t.folder_id));
+    opt.textContent = `${indent}${folderPath ? `${folderPath} / ` : ''}${t.title}`;
     if (task && task.dependencies && task.dependencies.includes(t.id)) {
       opt.selected = true;
     }
@@ -2481,7 +2782,7 @@ function renderTaskCustomFields(task) {
     } else {
       input = document.createElement('input');
       input.type = ['text', 'number', 'date'].includes(field.field_type) ? field.field_type : 'text';
-      if (input.type === 'number') input.step = '0.01';
+      if (input.type === 'number') input.step = /\bgrade\s*weight\b/i.test(field.name) ? 'any' : '0.01';
     }
     input.id = inputId;
     input.dataset.customFieldId = field.id;
@@ -2528,6 +2829,11 @@ async function handleSaveTask(e) {
     Array.from(document.querySelectorAll('#dynamicCustomFieldsContainer [data-custom-field-id]'))
       .map(input => [input.dataset.customFieldId, input.value])
   );
+  const gradeWeightField = customFields.find(field => /\bgrade\s*weight\b/i.test(field.name));
+  const gradeWeightValue = gradeWeightField ? custom_values[gradeWeightField.id] : undefined;
+  const weight_override = gradeWeightValue === undefined || gradeWeightValue === ''
+    ? null
+    : Number.isFinite(Number(gradeWeightValue)) ? Number(gradeWeightValue) : null;
 
   const payload = {
     title,
@@ -2545,6 +2851,7 @@ async function handleSaveTask(e) {
     earned_points,
     max_points,
     grade,
+    ...(gradeWeightField ? { weight_override } : {}),
     extra_credit,
     dependencies,
     custom_values
@@ -2596,7 +2903,7 @@ function populateParentFolderDropdown(selectedParentId = '', excludeFolderId = '
     if (excluded.has(folder.id)) return;
     const opt = document.createElement('option');
     opt.value = folder.id;
-    const indent = '  '.repeat(depth);
+    const indent = '\u00a0\u00a0'.repeat(depth);
     opt.textContent = `${indent}${folder.name}`;
     if (folder.id === selectedParentId) opt.selected = true;
     select.appendChild(opt);
@@ -2613,8 +2920,9 @@ function openFolderModal(folderToEdit = null, presetParentId = '') {
     document.getElementById('folderId').value = folderToEdit.id;
     document.getElementById('folderName').value = folderToEdit.name;
     document.getElementById('folderDesc').value = folderToEdit.description || '';
-    document.getElementById('folderWeight').value = folderToEdit.weight_percent || '';
+    document.getElementById('folderWeight').value = folderToEdit.weight_percent ?? '';
     document.getElementById('folderDropLowest').value = Number(folderToEdit.drop_lowest_count) || 0;
+    document.getElementById('folderBonusCap').checked = Boolean(folderToEdit.bonus_cap_enabled);
     document.getElementById('folderColor').value = folderToEdit.color || '#25c2fd';
     populateParentFolderDropdown(folderToEdit.parent_id, folderToEdit.id);
     document.getElementById('btnDeleteFolder').classList.remove('hidden');
@@ -2625,6 +2933,7 @@ function openFolderModal(folderToEdit = null, presetParentId = '') {
     document.getElementById('folderDesc').value = '';
     document.getElementById('folderWeight').value = '';
     document.getElementById('folderDropLowest').value = '0';
+    document.getElementById('folderBonusCap').checked = false;
     document.getElementById('folderColor').value = '#25c2fd';
     populateParentFolderDropdown(presetParentId);
     document.getElementById('btnDeleteFolder').classList.add('hidden');
@@ -2648,9 +2957,10 @@ async function handleSaveFolder(e) {
   const description = document.getElementById('folderDesc').value;
   const weight_percent = parseFloat(document.getElementById('folderWeight').value) || 0;
   const drop_lowest_count = Math.max(0, Math.floor(Number(document.getElementById('folderDropLowest').value) || 0));
+  const bonus_cap_enabled = document.getElementById('folderBonusCap').checked;
   const color = document.getElementById('folderColor').value;
 
-  const payload = { name, parent_id, description, weight_percent, drop_lowest_count, color };
+  const payload = { name, parent_id, description, weight_percent, drop_lowest_count, bonus_cap_enabled, color };
 
   try {
     if (folderId) {
