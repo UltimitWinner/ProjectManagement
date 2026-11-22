@@ -1,12 +1,13 @@
 import { sortTasks, excludeDoneTasks, buildGanttDependencyEdges, ganttDependencyPath, taskCustomFieldEntries, formatCustomFieldValue, getFolderPath, buildGanttRows, buildGanttWeekRanges, taskGanttDateRange, ganttTimeOffset, ganttCalendarDaysBetween, folderTreeGradePotential, pointsGradeProjection, weightedGradeContribution, currentGradeWithUngradedFolderDefault, tasksInFolderTree, tasksInFolderSubtree } from './task-utils.js';
 import { parseCsv, serializeCsv, detectCsvProfile, normalizeImportRow, normalizeHeader, getCsvProfile, parseTransferDateValue, parseTransferTimeValue } from './transfer-utils.js';
 import { parseLearningSuiteHtml, previewLearningSuiteMatches, normalizeTaskMatchTitle } from './learning-suite-utils.js';
+import { canvasCourseToBackup, canvasCourseLabel, parseCanvasAssignmentsHtml, detectCanvasAssignmentsHtml } from './canvas-utils.js';
 
 // State
 let currentUser = null; // { id, username, name, systemRole }
 let currentProjectAccess = 'none'; // 'none', 'view', 'edit' for the currently selected project
 let projects = [];
-let currentProjectId = null;
+let currentProjectId = new URLSearchParams(location.search).get('canvas_project') || null;
 let currentProject = null;
 let selectedStatsFolderId;
 let folders = []; // All folders & subfolders
@@ -27,6 +28,8 @@ let lastListDropAt = 0;
 let projectHolidayDraft = [];
 let pendingImport = null;
 let exportSelectedOnly = false;
+let canvasCourses = [];
+let canvasStatus = null;
 
 // Remove the legacy bearer token. Sessions now use an HttpOnly cookie.
 localStorage.removeItem('myplan_auth_token');
@@ -438,13 +441,13 @@ function saveCollapsedFolders() {
   }
 }
 
-function learningSuiteSyncMapKey(courseId) {
-  return `myplan_learning_suite_sync_${currentProjectId || 'none'}_${String(courseId || 'unknown')}`;
+function learningSuiteSyncMapKey(courseId, source = 'learning_suite') {
+  return `myplan_${source}_sync_${currentProjectId || 'none'}_${String(courseId || 'unknown')}`;
 }
 
-function loadLearningSuiteSyncMap(courseId) {
+function loadLearningSuiteSyncMap(courseId, source = 'learning_suite') {
   try {
-    const saved = JSON.parse(localStorage.getItem(learningSuiteSyncMapKey(courseId)) || '{}');
+    const saved = JSON.parse(localStorage.getItem(learningSuiteSyncMapKey(courseId, source)) || '{}');
     return {
       folders: saved.folders && typeof saved.folders === 'object' ? saved.folders : {},
       tasks: saved.tasks && typeof saved.tasks === 'object' ? saved.tasks : {}
@@ -454,8 +457,163 @@ function loadLearningSuiteSyncMap(courseId) {
   }
 }
 
-function saveLearningSuiteSyncMap(courseId, map) {
-  try { localStorage.setItem(learningSuiteSyncMapKey(courseId), JSON.stringify(map)); } catch {}
+function saveLearningSuiteSyncMap(courseId, map, source = 'learning_suite') {
+  try { localStorage.setItem(learningSuiteSyncMapKey(courseId, source), JSON.stringify(map)); } catch {}
+}
+
+async function handleCanvasOAuthRedirect() {
+  const params = new URLSearchParams(location.search);
+  const result = params.get('canvas_oauth');
+  if (!result) return;
+  history.replaceState({}, document.title, location.pathname + location.hash);
+  openDataTransferModal(false);
+  canvasStatus = { pendingOAuth: true };
+  document.getElementById('taskImportFormat').value = 'canvas';
+  previewTaskImport();
+  if (result === 'connected') {
+    document.getElementById('canvasConnectionStatus').textContent = 'Canvas connected. Loading your active courses…';
+    await refreshCanvasConnection(true);
+  } else {
+    document.getElementById('canvasConnectionStatus').textContent = result === 'denied'
+      ? 'Canvas access was not granted.'
+      : 'Canvas could not finish connecting. Check the developer key setup and try again.';
+  }
+}
+
+async function refreshCanvasConnection(loadCourses = false) {
+  const statusText = document.getElementById('canvasConnectionStatus');
+  const courseControls = document.getElementById('canvasCourseControls');
+  const connectButton = document.getElementById('btnConnectCanvas');
+  const disconnectButton = document.getElementById('btnDisconnectCanvas');
+  if (!currentProjectId) {
+    statusText.textContent = 'Select a project before connecting Canvas.';
+    courseControls.hidden = true;
+    return;
+  }
+  try {
+    const config = await api('/api/canvas/config');
+    connectButton.disabled = currentProjectAccess !== 'edit';
+    canvasStatus = await api(`/api/projects/${currentProjectId}/canvas/status`);
+    if (!canvasStatus.connected) {
+      statusText.textContent = 'Not connected. Connect to your school’s Canvas site to choose a course.';
+      courseControls.hidden = true;
+      disconnectButton.classList.add('hidden');
+      return;
+    }
+    disconnectButton.classList.remove('hidden');
+    document.getElementById('canvasInstanceUrl').value = canvasStatus.canvas_url;
+    statusText.textContent = `Connected to ${canvasStatus.canvas_url}. The token is stored encrypted for your MyPlan account.`;
+    courseControls.hidden = false;
+    if (loadCourses || !canvasCourses.length) await loadCanvasCourses();
+  } catch (error) {
+    statusText.textContent = error.message;
+  }
+}
+
+async function loadCanvasCourses() {
+  const statusText = document.getElementById('canvasConnectionStatus');
+  const select = document.getElementById('canvasCourseSelect');
+  try {
+    statusText.textContent = 'Loading Canvas courses…';
+    canvasCourses = await api(`/api/projects/${currentProjectId}/canvas/courses`);
+    select.innerHTML = '<option value="">Choose a course</option>';
+    canvasCourses.forEach(course => {
+      const option = document.createElement('option');
+      option.value = course.id;
+      option.textContent = [canvasCourseLabel(course), course.term].filter(Boolean).join(' · ');
+      select.appendChild(option);
+    });
+    statusText.textContent = canvasCourses.length
+      ? `Connected to ${canvasStatus.canvas_url}. Found ${canvasCourses.length} active course(s).`
+      : `Connected to ${canvasStatus.canvas_url}, but no active courses were returned.`;
+    document.getElementById('canvasCourseControls').hidden = false;
+    updateCanvasLoadButton();
+  } catch (error) {
+    statusText.textContent = error.message;
+  }
+}
+
+function updateCanvasLoadButton() {
+  const selected = document.getElementById('canvasCourseSelect').value;
+  document.getElementById('btnLoadCanvasCourse').disabled = !selected || currentProjectAccess !== 'edit';
+}
+
+async function connectCanvasAccount() {
+  const button = document.getElementById('btnConnectCanvas');
+  const statusText = document.getElementById('canvasConnectionStatus');
+  if (!currentProjectId || currentProjectAccess !== 'edit') return;
+  button.disabled = true;
+  statusText.textContent = 'Checking Canvas token…';
+  try {
+    const result = await api(`/api/projects/${currentProjectId}/canvas/connect-token`, {
+      method: 'POST',
+      body: JSON.stringify({ canvas_url: document.getElementById('canvasInstanceUrl').value.trim(), access_token: document.getElementById('canvasAccessToken').value })
+    });
+    document.getElementById('canvasAccessToken').value = '';
+    canvasStatus = { connected: true, canvas_url: result.canvas_url };
+    statusText.textContent = `Connected to ${result.canvas_url}. The token is stored encrypted for your MyPlan account.`;
+    await refreshCanvasConnection(true);
+  } catch (error) {
+    statusText.textContent = error.message;
+    button.disabled = false;
+  }
+}
+
+async function disconnectCanvasAccount() {
+  if (!currentProjectId || currentProjectAccess !== 'edit') return;
+  const button = document.getElementById('btnDisconnectCanvas');
+  const statusText = document.getElementById('canvasConnectionStatus');
+  button.disabled = true;
+  try {
+    await api(`/api/projects/${currentProjectId}/canvas/connection`, { method: 'DELETE' });
+    canvasStatus = { connected: false, canvas_url: '' };
+    canvasCourses = [];
+    document.getElementById('canvasInstanceUrl').value = '';
+    document.getElementById('canvasCourseSelect').innerHTML = '<option value="">Choose a course</option>';
+    document.getElementById('canvasCourseControls').hidden = true;
+    button.classList.add('hidden');
+    statusText.textContent = 'Canvas token removed from MyPlan. Revoke it in Canvas separately if you want to invalidate it.';
+  } catch (error) {
+    statusText.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function loadCanvasCoursePreview() {
+  const course = canvasCourses.find(item => item.id === document.getElementById('canvasCourseSelect').value);
+  if (!course || currentProjectAccess !== 'edit') return;
+  const button = document.getElementById('btnLoadCanvasCourse');
+  const preview = document.getElementById('taskImportPreview');
+  button.disabled = true;
+  preview.textContent = 'Reading Canvas assignments and grades…';
+  pendingImport = null;
+  try {
+    const groups = await api(`/api/projects/${currentProjectId}/canvas/courses/${encodeURIComponent(course.id)}/assignment-groups`);
+    const backup = canvasCourseToBackup(course, groups, canvasStatus?.canvas_url || '');
+    const syncMap = loadLearningSuiteSyncMap(backup.source.course_id, 'canvas');
+    const mergePreview = previewLearningSuiteMatches(backup, folders, tasks, syncMap);
+    pendingImport = { type: 'canvas', data: backup, count: backup.tasks.length, skipped: 0, mergePreview };
+    document.getElementById('taskImportUpdateMatchesGroup').hidden = false;
+    renderCanvasCoursePreview();
+  } catch (error) {
+    preview.textContent = `Could not load Canvas course: ${error.message}`;
+  } finally {
+    updateCanvasLoadButton();
+  }
+}
+
+function renderCanvasCoursePreview() {
+  if (pendingImport?.type !== 'canvas') return;
+  const { data: backup, mergePreview } = pendingImport;
+  const updateMatches = document.getElementById('taskImportUpdateMatches').checked;
+  const updates = updateMatches ? mergePreview.updated : 0;
+  const adds = updateMatches ? mergePreview.added : backup.tasks.length;
+  const categories = backup.folders.filter(folder => folder.parent_id);
+  const existingCategories = categories.filter(folder => mergePreview.matchedFolders.has(folder.id)).length;
+  document.getElementById('taskImportPreview').textContent =
+    `Canvas: ${backup.tasks.length} assignments in ${categories.length} assignment groups. Ready to add ${adds} and update ${updates} matching task(s); ${categories.length - existingCategories} group folder(s) will be added and ${existingCategories} refreshed.`;
+  document.getElementById('btnImportTasks').disabled = !backup.tasks.length || currentProjectAccess !== 'edit';
 }
 
 function clearGanttDropMarkers(clearDragging = true) {
@@ -850,6 +1008,8 @@ async function selectProject(id) {
   if (currentProjectId !== id) {
     selectedStatsFolderId = undefined;
     selectedTaskIds.clear();
+    canvasStatus = null;
+    canvasCourses = [];
   }
   currentProjectId = id;
   currentProject = projects.find(p => p.id === id);
@@ -996,6 +1156,7 @@ function openDataTransferModal(selectedOnly = false) {
   document.getElementById('btnExportTasks').textContent = exportSelectedOnly ? 'Download selected tasks' : 'Download tasks';
   updateExportHint();
   dataTransferModal.classList.remove('hidden');
+  previewTaskImport();
 }
 
 function updateExportHint() {
@@ -1122,20 +1283,36 @@ function previewTaskImport() {
   const preview = document.getElementById('taskImportPreview');
   const importButton = document.getElementById('btnImportTasks');
   const chosenFormat = document.getElementById('taskImportFormat').value;
-  const isLearningSuiteFile = chosenFormat === 'learning_suite_html' || file?.name.toLowerCase().endsWith('.html');
+  const existingPending = pendingImport;
+  const isCanvasHtml = chosenFormat === 'canvas_html';
+  const isHtmlFile = /\.html?$/i.test(file?.name || '');
+  let isLearningSuiteFile = chosenFormat === 'learning_suite_html' || (isHtmlFile && !isCanvasHtml);
   document.getElementById('taskImportCourseNameGroup').hidden = !isLearningSuiteFile;
   document.getElementById('learningSuiteImportInstructions').hidden = !isLearningSuiteFile;
-  document.getElementById('taskImportUpdateMatchesGroup').hidden = !isLearningSuiteFile;
+  document.getElementById('canvasHtmlImportInstructions').hidden = !isCanvasHtml;
+  document.getElementById('taskImportUpdateMatchesGroup').hidden = !isLearningSuiteFile && !isCanvasHtml;
   pendingImport = null;
   importButton.disabled = true;
   if (!file) { preview.textContent = 'Choose a file to preview its rows.'; return; }
-  if (file.name.toLowerCase().endsWith('.html')) document.getElementById('taskImportFormat').value = 'learning_suite_html';
-
   const reader = new FileReader();
   reader.onload = () => {
     const content = String(reader.result || '');
     try {
-      if (chosenFormat === 'learning_suite_html' || file.name.toLowerCase().endsWith('.html')) {
+      if (isHtmlFile || chosenFormat === 'learning_suite_html' || isCanvasHtml) {
+        const htmlSource = isCanvasHtml || (chosenFormat === 'auto' && detectCanvasAssignmentsHtml(content)) ? 'canvas' : 'learning_suite';
+        isLearningSuiteFile = htmlSource === 'learning_suite';
+        document.getElementById('taskImportCourseNameGroup').hidden = !isLearningSuiteFile;
+        document.getElementById('learningSuiteImportInstructions').hidden = !isLearningSuiteFile;
+        document.getElementById('canvasHtmlImportInstructions').hidden = isLearningSuiteFile;
+        document.getElementById('taskImportUpdateMatchesGroup').hidden = false;
+        if (htmlSource === 'canvas') {
+          const parsed = parseCanvasAssignmentsHtml(content, { courseName: document.getElementById('taskImportCourseName').value });
+          const mergePreview = previewLearningSuiteMatches(parsed.backup, folders, tasks, loadLearningSuiteSyncMap(parsed.courseId, 'canvas'));
+          pendingImport = { type: 'canvas_html', data: parsed.backup, count: parsed.backup.tasks.length, skipped: 0, mergePreview };
+          document.getElementById('taskImportUpdateMatchesGroup').hidden = false;
+          const graded = parsed.gradedCount;
+          preview.textContent = `Canvas saved page: ${parsed.backup.tasks.length} assignments, ${graded} graded. Review and import; assignment groups and any scores visible on the saved page are included.`;
+        } else {
         const courseNameField = document.getElementById('taskImportCourseName');
         const parsed = parseLearningSuiteHtml(content, courseNameField.value);
         if (!courseNameField.value) courseNameField.value = parsed.courseName;
@@ -1157,6 +1334,7 @@ function previewTaskImport() {
         const categoryCount = parsed.backup.folders.filter(folder => folder.parent_id).length;
         const newCategories = Math.max(0, categoryCount - existingCategories);
         preview.textContent = `BYU Learning Suite: ${parsed.backup.tasks.length} assignments, ${parsed.backup.folders.length - 1} categories, ${parsed.gradedCount} graded. Ready to add ${adds} and update ${updates} matching task(s); ${newCategories} category folder(s) will be added and ${existingCategories} refreshed. ${ambiguous} ambiguous title match(es) will be skipped.`;
+        }
       } else if (file.name.toLowerCase().endsWith('.json') || content.trimStart().startsWith('{')) {
         const backup = JSON.parse(content);
         const rows = Array.isArray(backup) ? backup : backup.tasks;
@@ -1356,6 +1534,7 @@ function makeTaskImportPayload(row, profile, folderId, customValueIds) {
     grade: parseTransferNumber(row.grade),
     weight_override: parseTransferNumber(row.weight_override),
     extra_credit: /^(?:1|true|yes|y)$/i.test(String(row.extra_credit || '').trim()),
+    never_drop: /^(?:1|true|yes|y)$/i.test(String(row.never_drop || '').trim()),
     dependencies: [],
     custom_values,
     _sourceId: row.id || '',
@@ -1375,9 +1554,12 @@ async function importTasks() {
   try {
     const data = pendingImport;
     const isLearningSuite = data.type === 'learning_suite_html';
-    const updateMatches = isLearningSuite && document.getElementById('taskImportUpdateMatches').checked;
+    const isCanvas = data.type === 'canvas' || data.type === 'canvas_html';
+    const isExternalSync = isLearningSuite || isCanvas;
+    const syncSource = isCanvas ? 'canvas' : 'learning_suite';
+    const updateMatches = isExternalSync && document.getElementById('taskImportUpdateMatches').checked;
     const learningSuiteCourseId = data.data?.source?.course_id || 'unknown';
-    const syncMap = isLearningSuite ? loadLearningSuiteSyncMap(learningSuiteCourseId) : null;
+    const syncMap = isExternalSync ? loadLearningSuiteSyncMap(learningSuiteCourseId, syncSource) : null;
     let normalizedRows = [];
     let folderSourceMap = new Map();
     let customValueIds = {};
@@ -1400,7 +1582,7 @@ async function importTasks() {
       const sourceFolders = backup.folders || [];
       for (const folder of [...sourceFolders].sort((a, b) => folderDepth(a, sourceFolders) - folderDepth(b, sourceFolders))) {
         const parentId = folder.parent_id ? folderSourceMap.get(folder.parent_id) || null : null;
-        const mappedId = isLearningSuite ? syncMap.folders[folder.id] : null;
+        const mappedId = isExternalSync ? syncMap.folders[folder.id] : null;
         let match = mappedId ? folders.find(item => item.id === mappedId && item.parent_id === parentId) : null;
         if (!match) match = folders.find(item => item.parent_id === parentId && item.name.toLowerCase() === String(folder.name).toLowerCase());
         let id = match?.id;
@@ -1409,35 +1591,40 @@ async function importTasks() {
             method: 'POST', body: JSON.stringify({
               name: folder.name, parent_id: parentId, description: folder.description || '', color: folder.color || '',
               weight_percent: Number(folder.weight_percent) || 0, drop_lowest_count: Number(folder.drop_lowest_count) || 0,
+              drop_highest_count: Number(folder.drop_highest_count) || 0,
               target_grade: Number(folder.target_grade) || 100,
               bonus_cap_enabled: Boolean(folder.bonus_cap_enabled)
             })
           });
           folders.push(made); id = made.id;
-        } else if (isLearningSuite) {
+        } else if (isExternalSync) {
           const isCourseRoot = !folder.parent_id;
           const nextWeight = isCourseRoot ? (Number(match.weight_percent) || 0) : (Number(folder.weight_percent) || 0);
           const nextDropLowest = isCourseRoot ? (Number(match.drop_lowest_count) || 0) : (Number(folder.drop_lowest_count) || 0);
+          const nextDropHighest = isCourseRoot ? (Number(match.drop_highest_count) || 0) : (Number(folder.drop_highest_count) || 0);
           const nextName = String(folder.name || match.name);
           const nextBonusCap = isCourseRoot ? Boolean(match.bonus_cap_enabled) : Boolean(folder.bonus_cap_enabled);
           if (match.name !== nextName || Number(match.weight_percent) !== nextWeight
-            || Number(match.drop_lowest_count) !== nextDropLowest || Boolean(match.bonus_cap_enabled) !== nextBonusCap) {
+            || Number(match.drop_lowest_count) !== nextDropLowest || Number(match.drop_highest_count) !== nextDropHighest
+            || Boolean(match.bonus_cap_enabled) !== nextBonusCap) {
             await api(`/api/folders/${match.id}`, {
               method: 'PUT',
               body: JSON.stringify({
                 name: nextName, parent_id: parentId, description: match.description || '', color: match.color || '',
-                weight_percent: nextWeight, drop_lowest_count: nextDropLowest, target_grade: Number(match.target_grade) || 100,
+                weight_percent: nextWeight, drop_lowest_count: nextDropLowest, drop_highest_count: nextDropHighest,
+                target_grade: Number(match.target_grade) || 100,
                 bonus_cap_enabled: nextBonusCap
               })
             });
-            Object.assign(match, { name: nextName, weight_percent: nextWeight, drop_lowest_count: nextDropLowest, bonus_cap_enabled: nextBonusCap });
+            Object.assign(match, { name: nextName, weight_percent: nextWeight, drop_lowest_count: nextDropLowest,
+              drop_highest_count: nextDropHighest, bonus_cap_enabled: nextBonusCap });
             updatedFolderCount += 1;
           }
         }
         folderSourceMap.set(folder.id, id);
-        if (isLearningSuite) syncMap.folders[folder.id] = id;
+        if (isExternalSync) syncMap.folders[folder.id] = id;
       }
-      if (isLearningSuite) saveLearningSuiteSyncMap(learningSuiteCourseId, syncMap);
+      if (isExternalSync) saveLearningSuiteSyncMap(learningSuiteCourseId, syncMap, syncSource);
       const sourceTasks = Array.isArray(backup) ? backup : (backup.tasks || []);
       normalizedRows = sourceTasks.map(task => ({
         ...task,
@@ -1475,6 +1662,7 @@ async function importTasks() {
           color: row.color || '', earned_points: row.earned_points ?? null, max_points: row.max_points ?? null,
           grade: row.grade ?? null, weight_override: row.weight_override ?? null,
           extra_credit: /^(?:1|true|yes|y)$/i.test(String(row.extra_credit || '').trim()),
+          never_drop: /^(?:1|true|yes|y)$/i.test(String(row.never_drop || '').trim()),
           custom_values, dependencies: []
         };
         row._sourceDependencies = row._sourceDependencies || [];
@@ -1483,7 +1671,7 @@ async function importTasks() {
       }
       const sourceId = row._sourceId || payload._sourceId || row.id;
       let existing = null;
-      if (isLearningSuite && updateMatches) {
+      if (isExternalSync && updateMatches) {
         const mappedTaskId = syncMap.tasks[String(sourceId || '')];
         existing = tasks.find(task => task.id === mappedTaskId && !claimedExistingTaskIds.has(task.id)) || null;
         if (!existing) {
@@ -1525,11 +1713,11 @@ async function importTasks() {
         createdCount += 1;
         if (sourceId) {
           sourceTaskIdMap.set(String(sourceId), created.id);
-          if (isLearningSuite) syncMap.tasks[String(sourceId)] = created.id;
+          if (isExternalSync) syncMap.tasks[String(sourceId)] = created.id;
         }
         tasksToLink.push({ id: created.id, payload, sourceDependencies: row._sourceDependencies || payload._sourceDependencies || [] });
       }
-      if (isLearningSuite) saveLearningSuiteSyncMap(learningSuiteCourseId, syncMap);
+      if (isExternalSync) saveLearningSuiteSyncMap(learningSuiteCourseId, syncMap, syncSource);
       preview.textContent = `Processed ${createdCount + updatedCount} of ${normalizedRows.length} assignments (${createdCount} added, ${updatedCount} updated).`;
     }
 
@@ -1544,7 +1732,9 @@ async function importTasks() {
     await loadTasks();
     preview.textContent = isLearningSuite
       ? `Learning Suite import complete: ${createdCount} task(s) added, ${updatedCount} updated, ${updatedFolderCount} category folder(s) refreshed${ambiguousCount ? `, ${ambiguousCount} ambiguous match(es) skipped` : ''}.`
-      : `Import complete: ${createdCount} task(s) added. ${data.skipped || 0} nameless row(s) were skipped.`;
+      : isCanvas
+        ? `Canvas import complete: ${createdCount} task(s) added, ${updatedCount} updated, ${updatedFolderCount} assignment group(s) refreshed${ambiguousCount ? `, ${ambiguousCount} ambiguous title match(es) skipped` : ''}.`
+        : `Import complete: ${createdCount} task(s) added. ${data.skipped || 0} nameless row(s) were skipped.`;
     pendingImport = null;
     setTimeout(closeDataTransferModal, 900);
   } catch (error) {
@@ -1780,8 +1970,10 @@ function renderFolderNode(folder, depth, gradeData) {
   const weightBadge = showFolderWeight
     ? `<span class="badge badge-custom">${escapeHtml(formatCustomFieldValue({ name: 'Grade Weight %' }, Number(folder.weight_percent) || 0))}% ${folder.bonus_cap_enabled ? 'bonus cap' : 'weight'}</span>`
     : '';
-  const dropLowestBadge = Number(folder.drop_lowest_count) > 0
-    ? `<span class="badge badge-custom">Drops ${Number(folder.drop_lowest_count)} lowest</span>` : '';
+  const dropRuleBadges = [
+    Number(folder.drop_lowest_count) > 0 ? `Drops ${Number(folder.drop_lowest_count)} lowest` : '',
+    Number(folder.drop_highest_count) > 0 ? `Drops ${Number(folder.drop_highest_count)} highest` : ''
+  ].filter(Boolean).map(label => `<span class="badge badge-custom">${escapeHtml(label)}</span>`).join(' ');
   const gradeBadge = folderStats.avg !== '--' ? `<span class="badge badge-grade">Score: ${folderStats.avg}%</span>` : '';
 
   node.innerHTML = `
@@ -1793,7 +1985,7 @@ function renderFolderNode(folder, depth, gradeData) {
         <span class="folder-icon">${folderIcon}</span>
         <strong>${escapeHtml(folder.name)}</strong>
         ${weightBadge}
-        ${dropLowestBadge}
+        ${dropRuleBadges}
         ${gradeBadge}
         <span class="task-count">${folderStats.totalCount} tasks</span>
       </div>
@@ -2016,6 +2208,7 @@ function createTaskTreeRow(task) {
       <span class="badge badge-${task.status}">${escapeHtml(getTaskStatusLabel(task))}</span>
       <span class="tree-task-title">${escapeHtml(task.title)}</span>
       <span class="badge badge-${task.priority}">${task.priority}</span>
+      ${task.never_drop ? '<span class="badge badge-custom">Never drop</span>' : ''}
       ${cfChips}
     </div>
     <div class="tree-task-meta">
@@ -2164,6 +2357,7 @@ function renderBoardView() {
       const folderPath = getFolderPath(task.folder_id, folders);
       const folderBadge = folderPath ? `<span class="badge badge-course">Folder: ${escapeHtml(folderPath)}</span>` : '';
       const extraCreditBadge = task.extra_credit ? '<span class="badge badge-custom">Extra Credit · 2×</span>' : '';
+      const neverDropBadge = task.never_drop ? '<span class="badge badge-custom">Never drop</span>' : '';
       applyTaskFolderColor(card, task);
 
       let gradeBadge = '';
@@ -2188,6 +2382,7 @@ function renderBoardView() {
           <span class="badge badge-${task.status}">${escapeHtml(getTaskStatusLabel(task))}</span>
           ${folderBadge}
           ${extraCreditBadge}
+          ${neverDropBadge}
           ${gradeBadge}
           ${depBadge}
         </div>
@@ -2316,7 +2511,7 @@ function renderListView() {
     tr.innerHTML = `
       <td><input type="checkbox" class="task-select-checkbox" aria-label="Select task" ${selectedTaskIds.has(task.id) ? 'checked' : ''} ${currentProjectAccess === 'none' ? 'disabled' : ''}></td>
       <td><span class="badge badge-${task.status}">${escapeHtml(getTaskStatusLabel(task))}</span></td>
-      <td style="font-weight: 600;">${escapeHtml(task.title)}${task.extra_credit ? ' <span class="badge badge-custom">Extra Credit</span>' : ''}</td>
+      <td style="font-weight: 600;">${escapeHtml(task.title)}${task.extra_credit ? ' <span class="badge badge-custom">Extra Credit</span>' : ''}${task.never_drop ? ' <span class="badge badge-custom">Never drop</span>' : ''}</td>
       <td><span class="badge badge-course folder-path-badge">${escapeHtml(folderPath || '-')}</span></td>
       <td><span class="badge badge-${task.priority}">${task.priority}</span></td>
       <td>${escapeHtml(formatTaskDateAndTime(task.start_date, task.start_time))}</td>
@@ -2700,6 +2895,7 @@ function openTaskModal(task = null, presetFolderId = '') {
   document.getElementById('taskMaxPoints').value = task?.max_points || '';
   document.getElementById('taskGrade').value = (task?.grade !== null && task?.grade !== undefined) ? task.grade : '';
   document.getElementById('taskExtraCredit').checked = Boolean(task?.extra_credit);
+  document.getElementById('taskNeverDrop').checked = Boolean(task?.never_drop);
 
   renderTaskCustomFields(task);
 
@@ -2822,6 +3018,7 @@ async function handleSaveTask(e) {
   const gradeRaw = document.getElementById('taskGrade').value;
   const grade = gradeRaw !== '' ? parseFloat(gradeRaw) : null;
   const extra_credit = document.getElementById('taskExtraCredit').checked;
+  const never_drop = document.getElementById('taskNeverDrop').checked;
 
   const depSelect = document.getElementById('taskDependencies');
   const dependencies = Array.from(depSelect.selectedOptions).map(o => o.value);
@@ -2853,6 +3050,7 @@ async function handleSaveTask(e) {
     grade,
     ...(gradeWeightField ? { weight_override } : {}),
     extra_credit,
+    never_drop,
     dependencies,
     custom_values
   };
@@ -2922,6 +3120,7 @@ function openFolderModal(folderToEdit = null, presetParentId = '') {
     document.getElementById('folderDesc').value = folderToEdit.description || '';
     document.getElementById('folderWeight').value = folderToEdit.weight_percent ?? '';
     document.getElementById('folderDropLowest').value = Number(folderToEdit.drop_lowest_count) || 0;
+    document.getElementById('folderDropHighest').value = Number(folderToEdit.drop_highest_count) || 0;
     document.getElementById('folderBonusCap').checked = Boolean(folderToEdit.bonus_cap_enabled);
     document.getElementById('folderColor').value = folderToEdit.color || '#25c2fd';
     populateParentFolderDropdown(folderToEdit.parent_id, folderToEdit.id);
@@ -2933,6 +3132,7 @@ function openFolderModal(folderToEdit = null, presetParentId = '') {
     document.getElementById('folderDesc').value = '';
     document.getElementById('folderWeight').value = '';
     document.getElementById('folderDropLowest').value = '0';
+    document.getElementById('folderDropHighest').value = '0';
     document.getElementById('folderBonusCap').checked = false;
     document.getElementById('folderColor').value = '#25c2fd';
     populateParentFolderDropdown(presetParentId);
@@ -2957,10 +3157,11 @@ async function handleSaveFolder(e) {
   const description = document.getElementById('folderDesc').value;
   const weight_percent = parseFloat(document.getElementById('folderWeight').value) || 0;
   const drop_lowest_count = Math.max(0, Math.floor(Number(document.getElementById('folderDropLowest').value) || 0));
+  const drop_highest_count = Math.max(0, Math.floor(Number(document.getElementById('folderDropHighest').value) || 0));
   const bonus_cap_enabled = document.getElementById('folderBonusCap').checked;
   const color = document.getElementById('folderColor').value;
 
-  const payload = { name, parent_id, description, weight_percent, drop_lowest_count, bonus_cap_enabled, color };
+  const payload = { name, parent_id, description, weight_percent, drop_lowest_count, drop_highest_count, bonus_cap_enabled, color };
 
   try {
     if (folderId) {

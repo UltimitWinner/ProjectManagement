@@ -6,6 +6,7 @@ const CSV_PROFILES = {
     ['Due Time', task => task.due_time], ['Task Opens At', task => task.open_at], ['Progress', task => task.progress],
     ['Earned Points', task => task.earned_points], ['Max Points', task => task.max_points], ['Grade Override', task => task.grade],
     ['Weight Override', task => task.weight_override], ['Extra Credit', task => task.extra_credit ? 'TRUE' : 'FALSE'],
+    ['Never Drop', task => task.never_drop ? 'TRUE' : 'FALSE'],
     ['Dependencies', task => task.dependencies]
   ],
   planner: [
@@ -52,6 +53,7 @@ const ALIASES = {
   grade: ['gradeoverride', 'grade', 'gradepercent'],
   weight_override: ['weightoverride', 'gradeweight'],
   extra_credit: ['extracredit', 'myplanextracredit', 'bonuswork'],
+  never_drop: ['neverdrop', 'myplanneverdrop', 'protectfromdroprules'],
   dependencies: ['dependencies', 'dependson', 'predecessors', 'myplandependencies']
 };
 

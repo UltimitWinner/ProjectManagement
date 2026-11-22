@@ -12,10 +12,12 @@ app.use('*', async (c, next) => {
     'Content-Security-Policy',
     "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none';"
   );
+  if (c.req.path.includes('/canvas/')) c.header('Cache-Control', 'no-store, private');
 });
 
 // Reject cross-origin browser requests; the app and API are same-origin.
 app.use('/api/*', async (c, next) => {
+  if (c.req.path === '/api/canvas/oauth/callback') return next();
   const origin = c.req.header('Origin');
   if (origin) {
     try {
@@ -188,6 +190,24 @@ async function initTables(db) {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS canvas_oauth_states (
+      state_hash TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      canvas_url TEXT NOT NULL,
+      redirect_uri TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS canvas_connections (
+      user_id TEXT PRIMARY KEY,
+      canvas_url TEXT NOT NULL,
+      access_token_encrypted TEXT NOT NULL,
+      refresh_token_encrypted TEXT,
+      expires_at TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    )`),
     db.prepare(`CREATE TABLE IF NOT EXISTS folders (
       id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL,
@@ -199,6 +219,7 @@ async function initTables(db) {
       sort_order INTEGER DEFAULT NULL,
       bonus_cap_enabled INTEGER NOT NULL DEFAULT 0,
       drop_lowest_count INTEGER NOT NULL DEFAULT 0,
+      drop_highest_count INTEGER NOT NULL DEFAULT 0,
       target_grade REAL DEFAULT 100,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
@@ -233,6 +254,7 @@ async function initTables(db) {
       grade REAL DEFAULT NULL,
       weight_override REAL DEFAULT NULL,
       extra_credit INTEGER NOT NULL DEFAULT 0,
+      never_drop INTEGER NOT NULL DEFAULT 0,
       sort_order INTEGER DEFAULT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -274,9 +296,11 @@ async function initTables(db) {
     ['projects', 'holidays_json', "TEXT NOT NULL DEFAULT '[]'"],
     ['projects', 'status_options_json', `TEXT NOT NULL DEFAULT '{"todo":[],"in_progress":[],"done":[]}'`],
     ['folders', 'drop_lowest_count', 'INTEGER NOT NULL DEFAULT 0'],
+    ['folders', 'drop_highest_count', 'INTEGER NOT NULL DEFAULT 0'],
     ['folders', 'sort_order', 'INTEGER DEFAULT NULL'],
     ['folders', 'bonus_cap_enabled', 'INTEGER NOT NULL DEFAULT 0'],
     ['tasks', 'extra_credit', 'INTEGER NOT NULL DEFAULT 0'],
+    ['tasks', 'never_drop', 'INTEGER NOT NULL DEFAULT 0'],
     ['tasks', 'start_time', 'TEXT'],
     ['tasks', 'due_time', 'TEXT'],
     ['tasks', 'open_at', 'TEXT'],
@@ -383,6 +407,383 @@ function verifyProjectPermission(accessLevel, minRequired = 'view') {
   if (minRequired === 'edit' && accessLevel !== 'edit') return false;
   return true;
 }
+
+function normalizeCanvasBaseUrl(value, env = {}) {
+  if (typeof value !== 'string' || value.length > 300) throw new Error('Enter your Canvas site URL.');
+  let url;
+  try { url = new URL(value.trim()); } catch { throw new Error('Enter a valid Canvas site URL, such as https://canvas.school.edu.'); }
+  const hostname = url.hostname.toLowerCase();
+  const configuredHosts = String(env.CANVAS_ALLOWED_HOSTS || '').split(',').map(host => host.trim().toLowerCase()).filter(Boolean);
+  const allowlisted = configuredHosts.some(host => host.startsWith('*.')
+    ? hostname.endsWith(host.slice(1)) && hostname !== host.slice(2)
+    : hostname === host);
+  const standardCanvasHost = hostname === 'canvas.instructure.com' || hostname.endsWith('.instructure.com')
+    || /\.(?:edu|edu\.[a-z]{2}|ac\.[a-z]{2})$/.test(hostname);
+  if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash
+    || (url.pathname !== '/' && url.pathname !== '') || (url.port && url.port !== '443')
+    || !hostname.includes('.') || /^\d+(?:\.\d+){3}$/.test(hostname)
+    || hostname === 'localhost' || hostname.endsWith('.localhost')
+    || /\.(?:local|internal|test|invalid|example|lan|home\.arpa)$/.test(hostname)
+    || (!standardCanvasHost && !allowlisted)) {
+    throw new Error('Use a public HTTPS Canvas site (such as a *.instructure.com or *.edu host). Custom domains must be added to CANVAS_ALLOWED_HOSTS.');
+  }
+  return url.origin;
+}
+
+function canvasBase64(bytes) {
+  let binary = '';
+  for (const byte of new Uint8Array(bytes)) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function canvasBytesFromBase64(value) {
+  return Uint8Array.from(atob(value), character => character.charCodeAt(0));
+}
+
+async function canvasEncryptionKey(env) {
+  if (typeof env.APP_PEPPER !== 'string' || env.APP_PEPPER.length < 32) {
+    throw new Error('APP_PEPPER must be configured before Canvas tokens can be stored.');
+  }
+  const material = new TextEncoder().encode(`myplan-canvas-token:${env.APP_PEPPER}`);
+  const digest = await crypto.subtle.digest('SHA-256', material);
+  return crypto.subtle.importKey('raw', digest, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+}
+
+async function encryptCanvasToken(value, env) {
+  const key = await canvasEncryptionKey(env);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encrypted = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(value));
+  return `${canvasBase64(iv)}.${canvasBase64(encrypted)}`;
+}
+
+async function decryptCanvasToken(value, env) {
+  if (typeof value !== 'string' || !value.includes('.')) throw new Error('Stored Canvas credentials are invalid. Reconnect Canvas.');
+  try {
+    const [ivPart, encryptedPart] = value.split('.', 2);
+    const key = await canvasEncryptionKey(env);
+    const decrypted = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: canvasBytesFromBase64(ivPart) }, key, canvasBytesFromBase64(encryptedPart)
+    );
+    return new TextDecoder().decode(decrypted);
+  } catch {
+    throw new Error('Could not unlock the stored Canvas credentials. Reconnect Canvas.');
+  }
+}
+
+async function canvasStateHash(state, env) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${env.APP_PEPPER}:${state}`));
+  return Array.from(new Uint8Array(digest)).map(byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function canvasTokenRequest(canvasUrl, parameters) {
+  const response = await fetch(`${canvasUrl}/login/oauth2/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+    body: new URLSearchParams(parameters)
+  });
+  let data = {};
+  try { data = await response.json(); } catch {}
+  if (!response.ok || !data.access_token) {
+    throw new Error(response.status === 401 || response.status === 403
+      ? 'Canvas rejected the OAuth request. Check the developer key and its redirect URL.'
+      : 'Canvas could not complete OAuth. Check the Canvas site URL and developer key settings.');
+  }
+  return data;
+}
+
+async function canvasGetAccessToken(db, env, userId) {
+  const connection = await db.prepare('SELECT * FROM canvas_connections WHERE user_id = ?').bind(userId).first();
+  if (!connection) throw new Error('Connect a Canvas account first.');
+  let accessToken = await decryptCanvasToken(connection.access_token_encrypted, env);
+  const expiresAt = connection.expires_at ? Date.parse(connection.expires_at) : 0;
+  if (expiresAt && expiresAt <= Date.now() + 90000) {
+    if (!connection.refresh_token_encrypted) throw new Error('Canvas access token is no longer valid. Reconnect with a new token.');
+    const refreshToken = await decryptCanvasToken(connection.refresh_token_encrypted, env);
+    let refreshed;
+    try {
+      refreshed = await canvasTokenRequest(connection.canvas_url, {
+        grant_type: 'refresh_token',
+        client_id: env.CANVAS_CLIENT_ID,
+        client_secret: env.CANVAS_CLIENT_SECRET,
+        refresh_token: refreshToken
+      });
+    } catch {
+      throw new Error('Canvas authorization expired. Connect your account again.');
+    }
+    accessToken = refreshed.access_token;
+    const nextRefreshToken = refreshed.refresh_token || refreshToken;
+    const nextExpiry = Number(refreshed.expires_in) > 0
+      ? new Date(Date.now() + Number(refreshed.expires_in) * 1000).toISOString()
+      : null;
+    await db.prepare(`UPDATE canvas_connections SET access_token_encrypted = ?, refresh_token_encrypted = ?,
+      expires_at = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?`)
+      .bind(await encryptCanvasToken(accessToken, env), await encryptCanvasToken(nextRefreshToken, env), nextExpiry, userId).run();
+  }
+  return { connection, accessToken };
+}
+
+function canvasNextPage(linkHeader) {
+  for (const segment of String(linkHeader || '').split(/,(?=\s*<)/)) {
+    if (!/rel="?next"?/i.test(segment)) continue;
+    const match = segment.match(/<([^>]+)>/);
+    return match?.[1] || null;
+  }
+  return null;
+}
+
+async function canvasGetAllPages(canvasUrl, accessToken, initialUrl) {
+  const items = [];
+  let nextUrl = new URL(initialUrl, `${canvasUrl}/`);
+  for (let page = 0; nextUrl && page < 200; page += 1) {
+    if (nextUrl.origin !== canvasUrl || !nextUrl.pathname.startsWith('/api/v1/')) {
+      throw new Error('Canvas returned an invalid pagination URL.');
+    }
+    const response = await fetch(nextUrl, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: 'application/json+canvas-string-ids'
+      }
+    });
+    if (response.status === 401) throw new Error('Canvas authorization is no longer valid. Connect your account again.');
+    if (response.status === 403) throw new Error('Canvas denied access to this course or its grades.');
+    if (response.status === 429) throw new Error('Canvas is rate limiting requests. Wait a moment and retry.');
+    if (!response.ok) throw new Error(`Canvas API returned HTTP ${response.status}.`);
+    const result = await response.json();
+    if (!Array.isArray(result)) throw new Error('Canvas returned an unexpected response.');
+    items.push(...result);
+    const next = canvasNextPage(response.headers.get('Link'));
+    nextUrl = next ? new URL(next, canvasUrl) : null;
+  }
+  if (nextUrl) throw new Error('Canvas returned too many pages of results.');
+  return items;
+}
+
+async function canvasGetCourses(canvasUrl, accessToken) {
+  const base = new URL('/api/v1/courses', `${canvasUrl}/`);
+  base.searchParams.set('enrollment_state', 'active');
+  base.searchParams.append('include[]', 'term');
+  base.searchParams.set('per_page', '100');
+  try {
+    return await canvasGetAllPages(canvasUrl, accessToken, base);
+  } catch (error) {
+    if (!/HTTP 403/.test(error.message)) throw error;
+    const userCourses = new URL('/api/v1/users/self/courses', `${canvasUrl}/`);
+    userCourses.searchParams.set('enrollment_state', 'active');
+    userCourses.searchParams.append('include[]', 'term');
+    userCourses.searchParams.set('per_page', '100');
+    return canvasGetAllPages(canvasUrl, accessToken, userCourses);
+  }
+}
+
+function canvasApiError(c, error) {
+  return c.json({ error: error instanceof Error ? error.message : 'Canvas request failed.' }, 502);
+}
+
+app.get('/api/canvas/config', async (c) => {
+  const user = await getAuthenticatedUser(c);
+  if (!user) return c.json({ error: 'Authentication required' }, 401);
+  return c.json({ tokenEnabled: true });
+});
+
+app.post('/api/projects/:id/canvas/connect-token', async (c) => {
+  return c.json({ error: 'Canvas token imports are temporarily disabled. Import a saved Canvas Assignments page instead.' }, 410);
+  /* Token connection is paused while this Canvas instance denies current-user API access. */
+  const user = await getAuthenticatedUser(c);
+  if (!user) return c.json({ error: 'Authentication required' }, 401);
+  const projectId = c.req.param('id');
+  const db = c.env.DB;
+  if (!verifyProjectPermission(await getProjectAccessLevel(db, projectId, user), 'edit')) return c.json({ error: 'Requires edit permission on project' }, 403);
+  if (typeof c.env.APP_PEPPER !== 'string' || c.env.APP_PEPPER.length < 32) return c.json({ error: 'APP_PEPPER must be configured as a secret of at least 32 characters.' }, 503);
+  let body;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON payload' }, 400); }
+  let canvasUrl;
+  try { canvasUrl = normalizeCanvasBaseUrl(body.canvas_url, c.env); } catch (error) { return c.json({ error: error.message }, 400); }
+  const tokenInput = typeof body.access_token === 'string' ? body.access_token.trim() : '';
+  const token = tokenInput.replace(/^Bearer\s+/i, '');
+  if (!token || token.length > 4096) return c.json({ error: 'Enter a valid Canvas access token.' }, 400);
+  try {
+    const checkUrl = new URL('/api/v1/users/self', `${canvasUrl}/`);
+    const response = await fetch(checkUrl, { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+    if (!response.ok) return c.json({ error: response.status === 401
+      ? 'Canvas returned 401 Unauthorized. Check that this is a current API access token for this exact Canvas site; a login/session token will not work.'
+      : response.status === 403
+        ? 'Canvas returned 403 Forbidden for the current-user API. Your Canvas administrator may restrict API access for personal tokens.'
+        : `Canvas returned HTTP ${response.status} while checking the token.` }, 400);
+    let courseCheck = await fetch(new URL('/api/v1/courses?per_page=1', `${canvasUrl}/`), { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+    if (courseCheck.status === 403) {
+      courseCheck = await fetch(new URL('/api/v1/users/self/courses?per_page=1', `${canvasUrl}/`), { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } });
+    }
+    if (!courseCheck.ok) return c.json({ error: courseCheck.status === 403
+      ? 'Canvas authenticated the token but denied both course-list endpoints. Your administrator may need to allow Canvas API access, or use the saved Assignments page import.'
+      : `Canvas returned HTTP ${courseCheck.status} while checking course access.` }, 400);
+    await db.prepare(`INSERT OR REPLACE INTO canvas_connections (user_id, canvas_url, access_token_encrypted, refresh_token_encrypted, expires_at, updated_at) VALUES (?, ?, ?, NULL, NULL, CURRENT_TIMESTAMP)`)
+      .bind(user.id, canvasUrl, await encryptCanvasToken(token, c.env)).run();
+    return c.json({ connected: true, canvas_url: canvasUrl });
+  } catch (error) { return c.json({ error: error instanceof Error ? error.message : 'Could not connect to Canvas.' }, 502); }
+});
+
+app.post('/api/projects/:id/canvas/connect', async (c) => {
+  return c.json({ error: 'Canvas OAuth has been retired. Use the access-token connection flow.' }, 410);
+  /* Legacy OAuth implementation retained temporarily for existing deployments. */
+  const user = await getAuthenticatedUser(c);
+  if (!user) return c.json({ error: 'Authentication required' }, 401);
+  const projectId = c.req.param('id');
+  const db = c.env.DB;
+  if (!verifyProjectPermission(await getProjectAccessLevel(db, projectId, user), 'edit')) {
+    return c.json({ error: 'Requires edit permission on project' }, 403);
+  }
+  if (!c.env.CANVAS_CLIENT_ID || !c.env.CANVAS_CLIENT_SECRET) {
+    return c.json({ error: 'Canvas OAuth is not configured. Set CANVAS_CLIENT_ID and CANVAS_CLIENT_SECRET after registering a Canvas developer key.' }, 503);
+  }
+  if (typeof c.env.APP_PEPPER !== 'string' || c.env.APP_PEPPER.length < 32) {
+    return c.json({ error: 'APP_PEPPER must be configured as a secret of at least 32 characters.' }, 503);
+  }
+  let body;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON payload' }, 400); }
+  let canvasUrl;
+  try { canvasUrl = normalizeCanvasBaseUrl(body.canvas_url, c.env); } catch (error) { return c.json({ error: error.message }, 400); }
+
+  const state = `mp_${generateSalt()}${generateSalt()}`;
+  const stateHash = await canvasStateHash(state, c.env);
+  const redirectUri = new URL('/api/canvas/oauth/callback', c.req.url).toString();
+  await db.prepare("DELETE FROM canvas_oauth_states WHERE datetime(created_at) < datetime('now', '-15 minutes')").run();
+  await db.prepare(`INSERT INTO canvas_oauth_states (state_hash, user_id, project_id, canvas_url, redirect_uri)
+    VALUES (?, ?, ?, ?, ?)`)
+    .bind(stateHash, user.id, projectId, canvasUrl, redirectUri).run();
+
+  const authUrl = new URL('/login/oauth2/auth', `${canvasUrl}/`);
+  authUrl.searchParams.set('client_id', c.env.CANVAS_CLIENT_ID);
+  authUrl.searchParams.set('response_type', 'code');
+  authUrl.searchParams.set('redirect_uri', redirectUri);
+  authUrl.searchParams.set('state', state);
+  authUrl.searchParams.set('scope', 'url:GET|/api/v1/courses url:GET|/api/v1/courses/:course_id/assignment_groups');
+  return c.json({ authorization_url: authUrl.toString() });
+});
+
+app.get('/api/canvas/oauth/callback', async (c) => {
+  return c.text('Canvas OAuth has been retired. Return to MyPlan and connect with an access token.', 410);
+  /* Legacy OAuth callback retained temporarily for existing deployments. */
+  const state = c.req.query('state') || '';
+  if (!state || typeof c.env.APP_PEPPER !== 'string' || c.env.APP_PEPPER.length < 32) {
+    return c.text('Canvas authorization could not be verified. Return to MyPlan and try again.', 400);
+  }
+  const db = c.env.DB;
+  await initTables(db);
+  const stateHash = await canvasStateHash(state, c.env);
+  const pending = await db.prepare('SELECT * FROM canvas_oauth_states WHERE state_hash = ?').bind(stateHash).first();
+  await db.prepare('DELETE FROM canvas_oauth_states WHERE state_hash = ?').bind(stateHash).run();
+  if (!pending || Date.now() - Date.parse(pending.created_at) > 15 * 60 * 1000) {
+    return c.text('Canvas authorization expired. Return to MyPlan and try again.', 400);
+  }
+  if (c.req.query('error') || !c.req.query('code')) {
+    const target = new URL('/', c.req.url);
+    target.searchParams.set('canvas_oauth', 'denied');
+    target.searchParams.set('canvas_project', pending.project_id);
+    return c.redirect(target.toString(), 303);
+  }
+
+  try {
+    const tokens = await canvasTokenRequest(pending.canvas_url, {
+      grant_type: 'authorization_code',
+      client_id: c.env.CANVAS_CLIENT_ID,
+      client_secret: c.env.CANVAS_CLIENT_SECRET,
+      redirect_uri: pending.redirect_uri,
+      code: c.req.query('code')
+    });
+    const oldConnection = await db.prepare('SELECT * FROM canvas_connections WHERE user_id = ?').bind(pending.user_id).first();
+    if (oldConnection) {
+      try {
+        const oldAccess = await decryptCanvasToken(oldConnection.access_token_encrypted, c.env);
+        await fetch(`${oldConnection.canvas_url}/login/oauth2/token`, {
+          method: 'DELETE', headers: { Authorization: `Bearer ${oldAccess}` }
+        });
+      } catch { /* Reauthorization below replaces any credentials that could not be revoked. */ }
+    }
+    const expiresAt = Number(tokens.expires_in) > 0
+      ? new Date(Date.now() + Number(tokens.expires_in) * 1000).toISOString()
+      : null;
+    await db.prepare(`INSERT OR REPLACE INTO canvas_connections
+      (user_id, canvas_url, access_token_encrypted, refresh_token_encrypted, expires_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`)
+      .bind(pending.user_id, pending.canvas_url,
+        await encryptCanvasToken(tokens.access_token, c.env),
+        tokens.refresh_token ? await encryptCanvasToken(tokens.refresh_token, c.env) : null,
+        expiresAt).run();
+    const target = new URL('/', c.req.url);
+    target.searchParams.set('canvas_oauth', 'connected');
+    target.searchParams.set('canvas_project', pending.project_id);
+    return c.redirect(target.toString(), 303);
+  } catch {
+    const target = new URL('/', c.req.url);
+    target.searchParams.set('canvas_oauth', 'error');
+    target.searchParams.set('canvas_project', pending.project_id);
+    return c.redirect(target.toString(), 303);
+  }
+});
+
+app.get('/api/projects/:id/canvas/status', async (c) => {
+  return c.json({ error: 'Canvas token imports are temporarily disabled.' }, 410);
+  /* Legacy account status endpoint is paused with token imports. */
+  const user = await getAuthenticatedUser(c);
+  if (!user) return c.json({ error: 'Authentication required' }, 401);
+  const projectId = c.req.param('id');
+  if (!verifyProjectPermission(await getProjectAccessLevel(c.env.DB, projectId, user), 'view')) return c.json({ error: 'Access denied' }, 403);
+  const connection = await c.env.DB.prepare('SELECT canvas_url, expires_at FROM canvas_connections WHERE user_id = ?').bind(user.id).first();
+  return c.json({ connected: Boolean(connection), canvas_url: connection?.canvas_url || '', expires_at: connection?.expires_at || null });
+});
+
+app.get('/api/projects/:id/canvas/courses', async (c) => {
+  return c.json({ error: 'Canvas token imports are temporarily disabled.' }, 410);
+  /* Legacy API import endpoint is paused. */
+  const user = await getAuthenticatedUser(c);
+  if (!user) return c.json({ error: 'Authentication required' }, 401);
+  const projectId = c.req.param('id');
+  if (!verifyProjectPermission(await getProjectAccessLevel(c.env.DB, projectId, user), 'view')) return c.json({ error: 'Access denied' }, 403);
+  try {
+    const { connection, accessToken } = await canvasGetAccessToken(c.env.DB, c.env, user.id);
+    const courses = await canvasGetCourses(connection.canvas_url, accessToken);
+    return c.json(courses.map(course => ({
+      id: String(course.id), name: course.name || course.course_code || `Course ${course.id}`,
+      course_code: course.course_code || '', term: course.term?.name || '',
+      apply_assignment_group_weights: Boolean(course.apply_assignment_group_weights)
+    })));
+  } catch (error) { return canvasApiError(c, error); }
+});
+
+app.get('/api/projects/:id/canvas/courses/:courseId/assignment-groups', async (c) => {
+  return c.json({ error: 'Canvas token imports are temporarily disabled.' }, 410);
+  /* Legacy API import endpoint is paused. */
+  const user = await getAuthenticatedUser(c);
+  if (!user) return c.json({ error: 'Authentication required' }, 401);
+  const projectId = c.req.param('id');
+  if (!verifyProjectPermission(await getProjectAccessLevel(c.env.DB, projectId, user), 'edit')) {
+    return c.json({ error: 'Requires edit permission on project' }, 403);
+  }
+  const courseId = c.req.param('courseId');
+  if (!/^\d{1,20}$/.test(courseId)) return c.json({ error: 'Invalid Canvas course ID.' }, 400);
+  try {
+    const { connection, accessToken } = await canvasGetAccessToken(c.env.DB, c.env, user.id);
+    const url = new URL(`/api/v1/courses/${courseId}/assignment_groups`, `${connection.canvas_url}/`);
+    url.searchParams.append('include[]', 'assignments');
+    url.searchParams.append('include[]', 'submission');
+    url.searchParams.append('include[]', 'all_dates');
+    url.searchParams.set('per_page', '100');
+    const groups = await canvasGetAllPages(connection.canvas_url, accessToken, url);
+    return c.json(groups);
+  } catch (error) { return canvasApiError(c, error); }
+});
+
+app.delete('/api/projects/:id/canvas/connection', async (c) => {
+  const user = await getAuthenticatedUser(c);
+  if (!user) return c.json({ error: 'Authentication required' }, 401);
+  const projectId = c.req.param('id');
+  if (!verifyProjectPermission(await getProjectAccessLevel(c.env.DB, projectId, user), 'edit')) {
+    return c.json({ error: 'Requires edit permission on project' }, 403);
+  }
+  // Remove the stored credential locally. Token revocation is managed in Canvas.
+  await c.env.DB.prepare('DELETE FROM canvas_connections WHERE user_id = ?').bind(user.id).run();
+  return c.json({ success: true });
+});
 
 // ----------------- Auth API Routes -----------------
 app.get('/api/auth/me', async (c) => {
@@ -807,16 +1208,18 @@ app.post('/api/projects/:id/folders', async (c) => {
   const weight_percent = Number.isFinite(requestedWeight) ? Math.max(0, requestedWeight) : 0;
   const requestedDropLowest = Number(body.drop_lowest_count);
   const drop_lowest_count = Number.isFinite(requestedDropLowest) ? Math.max(0, Math.floor(requestedDropLowest)) : 0;
+  const requestedDropHighest = Number(body.drop_highest_count);
+  const drop_highest_count = Number.isFinite(requestedDropHighest) ? Math.max(0, Math.floor(requestedDropHighest)) : 0;
   const target_grade = Number(body.target_grade) || 100;
   const bonus_cap_enabled = body.bonus_cap_enabled === true || body.bonus_cap_enabled === 1
     || body.bonus_cap_enabled === '1' || body.bonus_cap_enabled === 'true' ? 1 : 0;
 
   await db.prepare(`
-    INSERT INTO folders (id, project_id, parent_id, name, description, color, weight_percent, drop_lowest_count, target_grade, bonus_cap_enabled)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).bind(id, projectId, parent_id, name, description, color, weight_percent, drop_lowest_count, target_grade, bonus_cap_enabled).run();
+    INSERT INTO folders (id, project_id, parent_id, name, description, color, weight_percent, drop_lowest_count, drop_highest_count, target_grade, bonus_cap_enabled)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(id, projectId, parent_id, name, description, color, weight_percent, drop_lowest_count, drop_highest_count, target_grade, bonus_cap_enabled).run();
 
-  return c.json({ id, project_id: projectId, parent_id, name, description, color, weight_percent, drop_lowest_count, target_grade, bonus_cap_enabled }, 201);
+  return c.json({ id, project_id: projectId, parent_id, name, description, color, weight_percent, drop_lowest_count, drop_highest_count, target_grade, bonus_cap_enabled }, 201);
 });
 
 app.put('/api/folders/:id', async (c) => {
@@ -840,6 +1243,8 @@ app.put('/api/folders/:id', async (c) => {
   const weight_percent = Number.isFinite(requestedWeight) ? Math.max(0, requestedWeight) : 0;
   const requestedDropLowest = Number(body.drop_lowest_count);
   const drop_lowest_count = Number.isFinite(requestedDropLowest) ? Math.max(0, Math.floor(requestedDropLowest)) : 0;
+  const requestedDropHighest = Number(body.drop_highest_count);
+  const drop_highest_count = Number.isFinite(requestedDropHighest) ? Math.max(0, Math.floor(requestedDropHighest)) : 0;
   const target_grade = Number(body.target_grade) || 100;
   const bonus_cap_enabled = body.bonus_cap_enabled === undefined
     ? Number(folder.bonus_cap_enabled) || 0
@@ -866,10 +1271,10 @@ app.put('/api/folders/:id', async (c) => {
 
   await db.prepare(`
     UPDATE folders
-    SET name = ?, parent_id = ?, description = ?, color = ?, weight_percent = ?, drop_lowest_count = ?, target_grade = ?, bonus_cap_enabled = ?,
+    SET name = ?, parent_id = ?, description = ?, color = ?, weight_percent = ?, drop_lowest_count = ?, drop_highest_count = ?, target_grade = ?, bonus_cap_enabled = ?,
         sort_order = CASE WHEN parent_id IS NOT ? THEN NULL ELSE sort_order END
     WHERE id = ?
-  `).bind(name, parent_id, description, color, weight_percent, drop_lowest_count, target_grade, bonus_cap_enabled, parent_id, id).run();
+  `).bind(name, parent_id, description, color, weight_percent, drop_lowest_count, drop_highest_count, target_grade, bonus_cap_enabled, parent_id, id).run();
 
   return c.json({ success: true });
 });
@@ -1129,10 +1534,11 @@ app.post('/api/projects/:id/tasks', async (c) => {
   const priority = ['none', 'low', 'medium', 'high', 'urgent'].includes(body.priority) ? body.priority : 'medium';
   const progress = Math.max(0, Math.min(100, Number(body.progress) || 0));
   const extra_credit = body.extra_credit === true || body.extra_credit === 1 || body.extra_credit === '1' || body.extra_credit === 'true' ? 1 : 0;
+  const never_drop = body.never_drop === true || body.never_drop === 1 || body.never_drop === '1' || body.never_drop === 'true' ? 1 : 0;
 
   await db.prepare(`
-    INSERT INTO tasks (id, project_id, folder_id, title, description, status, status_label, priority, start_date, due_date, start_time, due_time, open_at, progress, color, earned_points, max_points, grade, weight_override, extra_credit)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO tasks (id, project_id, folder_id, title, description, status, status_label, priority, start_date, due_date, start_time, due_time, open_at, progress, color, earned_points, max_points, grade, weight_override, extra_credit, never_drop)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).bind(
     id,
     projectId,
@@ -1153,7 +1559,8 @@ app.post('/api/projects/:id/tasks', async (c) => {
     body.max_points !== undefined && body.max_points !== '' && body.max_points !== null ? Number(body.max_points) : null,
     body.grade !== undefined && body.grade !== '' && body.grade !== null ? Number(body.grade) : null,
     body.weight_override !== undefined && body.weight_override !== '' && body.weight_override !== null ? Number(body.weight_override) : null,
-    extra_credit
+    extra_credit,
+    never_drop
   ).run();
 
   if (Array.isArray(body.dependencies)) {
@@ -1196,11 +1603,12 @@ app.put('/api/tasks/:id', async (c) => {
   const priority = ['none', 'low', 'medium', 'high', 'urgent'].includes(body.priority) ? body.priority : 'medium';
   const progress = Math.max(0, Math.min(100, Number(body.progress) || 0));
   const extra_credit = body.extra_credit === true || body.extra_credit === 1 || body.extra_credit === '1' || body.extra_credit === 'true' ? 1 : 0;
+  const never_drop = body.never_drop === true || body.never_drop === 1 || body.never_drop === '1' || body.never_drop === 'true' ? 1 : 0;
 
   await db.prepare(`
     UPDATE tasks
     SET title = ?, description = ?, folder_id = ?, status = ?, status_label = ?, priority = ?, start_date = ?, due_date = ?, start_time = ?, due_time = ?, open_at = ?, progress = ?, color = ?,
-        earned_points = ?, max_points = ?, grade = ?, weight_override = ?, extra_credit = ?, updated_at = CURRENT_TIMESTAMP
+        earned_points = ?, max_points = ?, grade = ?, weight_override = ?, extra_credit = ?, never_drop = ?, updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
   `).bind(
     title,
@@ -1221,6 +1629,7 @@ app.put('/api/tasks/:id', async (c) => {
     body.grade !== undefined && body.grade !== '' && body.grade !== null ? Number(body.grade) : null,
     body.weight_override !== undefined && body.weight_override !== '' && body.weight_override !== null ? Number(body.weight_override) : null,
     extra_credit,
+    never_drop,
     id
   ).run();
 

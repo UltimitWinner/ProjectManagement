@@ -1806,6 +1806,11 @@ body {
   gap: 1rem;
 }
 
+.canvas-auth-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
 label {
   font-size: 0.8rem;
   font-weight: 600;
@@ -1817,6 +1822,7 @@ input[type="password"],
 input[type="date"],
 input[type="number"],
 input[type="time"],
+input[type="url"],
 input[type="datetime-local"],
 select,
 textarea {

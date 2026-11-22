@@ -406,6 +406,10 @@
               <input type="checkbox" id="taskExtraCredit">
               Extra credit (up to 2x; unearned work does not lower the grade)
             </label>
+            <label for="taskNeverDrop">
+              <input type="checkbox" id="taskNeverDrop">
+              Never drop this task when applying folder drop rules
+            </label>
           </div>
         </div>
 
@@ -509,8 +513,7 @@
         </section>
         <section class="transfer-panel">
           <h3>Import tasks</h3>
-          <p class="form-hint">Import CSV, JSON, or a saved BYU Learning Suite Assignments page. CSV and JSON imports
-            add tasks to this project. The Learning Suite option can update matching tasks and category weights.</p>
+          <p class="form-hint">Import CSV, JSON, or a saved BYU Learning Suite or Canvas Assignments page.</p>
           <div class="form-row">
             <div class="form-group">
               <label for="taskImportFormat">Source format</label>
@@ -521,11 +524,12 @@
                 <option value="monday">monday.com CSV</option>
                 <option value="clickup">ClickUp CSV</option>
                 <option value="learning_suite_html">BYU Learning Suite saved page (HTML)</option>
+                <option value="canvas_html">Canvas saved Assignments page (HTML)</option>
               </select>
             </div>
-            <div class="form-group">
-              <label for="taskImportFile">Choose CSV, JSON, or saved HTML file</label>
-              <input type="file" id="taskImportFile" accept=".csv,.json,.txt,.html,text/csv,text/html,application/json">
+            <div class="form-group" id="taskImportFileGroup">
+              <label for="taskImportFile">Choose CSV, JSON, or saved HTML/HTM file</label>
+              <input type="file" id="taskImportFile" accept=".csv,.json,.txt,.html,.htm,text/csv,text/html,application/json">
             </div>
           </div>
           <div class="form-group" id="taskImportCourseNameGroup" hidden>
@@ -539,9 +543,12 @@
             HTML file here. MyPlan reads the saved file in your browser; it does not log in to Learning Suite or upload
             the raw HTML page.
           </p>
+          <p class="form-hint" id="canvasHtmlImportInstructions" hidden>
+            In Canvas, open the course <strong>Assignments</strong> page, use your browser’s Save Page command, and select the saved HTML file here. MyPlan reads the file locally; scores are included only if they appear in the saved table.
+          </p>
           <label class="form-hint transfer-import-option" id="taskImportUpdateMatchesGroup" hidden>
             <input type="checkbox" id="taskImportUpdateMatches" checked>
-            Update matching Learning Suite tasks instead of adding duplicates (category weights always refresh)
+            Update matching imported tasks instead of adding duplicates (folder weights refresh)
           </label>
           <div id="taskImportPreview" class="import-preview" aria-live="polite">Choose a file to preview its rows.</div>
           <div class="modal-footer transfer-footer">
@@ -588,10 +595,17 @@
           </div>
         </div>
         <div class="form-group">
-          <label for="folderDropLowest">Drop Lowest Tasks</label>
-          <input type="number" id="folderDropLowest" step="1" min="0" value="0" placeholder="0">
-          <span class="form-hint">Applies to tasks counted in this folder score, including weighted subfolders. Current
-            drops lowest graded tasks; maximum drops lowest entered grades; minimum drops ungraded tasks first.</span>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="folderDropLowest">Drop Lowest Tasks</label>
+              <input type="number" id="folderDropLowest" step="1" min="0" value="0" placeholder="0">
+            </div>
+            <div class="form-group">
+              <label for="folderDropHighest">Drop Highest Tasks</label>
+              <input type="number" id="folderDropHighest" step="1" min="0" value="0" placeholder="0">
+            </div>
+          </div>
+          <span class="form-hint">Applies to tasks counted in this folder score, including weighted subfolders. Never-drop tasks are protected. Current scores drop graded work; maximum and minimum predictions apply the rules to perfect and zero scores for ungraded work respectively.</span>
         </div>
         <div class="form-group">
           <label class="folder-bonus-cap-toggle" for="folderBonusCap">

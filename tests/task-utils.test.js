@@ -326,6 +326,34 @@ test('folder drop-lowest rule affects current, maximum, and minimum scores acros
   assert.deepEqual(potential.droppedTaskIdsCurrent, ['lowest']);
 });
 
+test('folder drop-highest respects never-drop tasks and projects ungraded work in max and min', () => {
+  const folders = [{ id: 'category', parent_id: null, weight_percent: 0, drop_highest_count: 1 }];
+  const tasks = [
+    { id: 'low', folder_id: 'category', grade: 50, max_points: 100 },
+    { id: 'high', folder_id: 'category', grade: 110, max_points: 100 },
+    { id: 'protected', folder_id: 'category', grade: 120, max_points: 100, never_drop: true },
+    { id: 'ungraded', folder_id: 'category', grade: null, max_points: 100 }
+  ];
+
+  const potential = folderTreeGradePotential('category', folders, tasks);
+  assert.equal(potential.average, 85, 'current drops the highest graded task that is not protected');
+  assert.equal(potential.maxAverage, 90, 'maximum applies the rule to hypothetical perfect ungraded work');
+  assert.equal(potential.minAverage, 56.666666666666664, 'minimum applies the rule to hypothetical zero ungraded work');
+  assert.deepEqual(potential.droppedTaskIdsCurrent, ['high']);
+});
+
+test('folder can apply drop-lowest and drop-highest counts without dropping a task twice', () => {
+  const folders = [{ id: 'category', parent_id: null, weight_percent: 0, drop_lowest_count: 1, drop_highest_count: 1 }];
+  const tasks = [
+    { id: 'lowest', folder_id: 'category', grade: 20, max_points: 100 },
+    { id: 'middle', folder_id: 'category', grade: 60, max_points: 100 },
+    { id: 'highest', folder_id: 'category', grade: 100, max_points: 100 }
+  ];
+  const potential = folderTreeGradePotential('category', folders, tasks);
+  assert.equal(potential.average, 60);
+  assert.deepEqual(potential.droppedTaskIdsCurrent, ['lowest', 'highest']);
+});
+
 test('point-based maximum is 70% for a zero score worth 30 points with 70 points remaining', () => {
   const projection = pointsGradeProjection([
     { grade: 0, earned_points: null, max_points: 30 },

@@ -475,15 +475,25 @@ function bonusFolderScore(folderId, folders, tasks, customWeightFieldId, scenari
   return totalWeight > 0 ? (earnedWeight / totalWeight) * 100 : 0;
 }
 
-function tasksDroppedForScenario(tasks, count, scenario) {
-  const eligible = scenario === 'minimum'
-    ? tasks
-    : tasks.filter(task => inputTaskScore(task) !== null && Number.isFinite(inputTaskScore(task)));
-  const scoreFor = task => inputTaskScore(task) ?? 0;
-  eligible.sort((a, b) => scoreFor(a) - scoreFor(b)
-    || (scenario === 'minimum' ? Number(inputTaskScore(a) !== null) - Number(inputTaskScore(b) !== null) : 0)
-    || String(a.id).localeCompare(String(b.id)));
-  return new Set(eligible.slice(0, Math.max(0, Math.floor(Number(count) || 0))).map(task => task.id));
+function taskScenarioScore(task, scenario) {
+  const score = inputTaskScore(task);
+  if (score !== null && Number.isFinite(score)) return score;
+  if (scenario === 'current') return null;
+  return scenario === 'maximum' ? (task.extra_credit ? 200 : 100) : 0;
+}
+
+function tasksDroppedForScenario(tasks, lowestCount, highestCount, scenario) {
+  const eligible = tasks.filter(task => !task.never_drop && taskScenarioScore(task, scenario) !== null);
+  const scoreFor = task => taskScenarioScore(task, scenario);
+  const byLowest = (a, b) => scoreFor(a) - scoreFor(b) || String(a.id).localeCompare(String(b.id));
+  const byHighest = (a, b) => scoreFor(b) - scoreFor(a) || String(a.id).localeCompare(String(b.id));
+  const dropped = new Set();
+  eligible.sort(byLowest).slice(0, Math.max(0, Math.floor(Number(lowestCount) || 0)))
+    .forEach(task => dropped.add(task.id));
+  eligible.filter(task => !dropped.has(task.id)).sort(byHighest)
+    .slice(0, Math.max(0, Math.floor(Number(highestCount) || 0)))
+    .forEach(task => dropped.add(task.id));
+  return dropped;
 }
 
 function scenarioValue(potential, scenario) {
@@ -504,7 +514,7 @@ function folderTreeScenario(folderId, folders, tasks, customWeightFieldId, scena
   }
 
   const contributingTasks = folderContributingTasks(folderId, folders, tasks, new Set(), customWeightFieldId);
-  const ownDropped = tasksDroppedForScenario(contributingTasks, folder.drop_lowest_count, scenario);
+  const ownDropped = tasksDroppedForScenario(contributingTasks, folder.drop_lowest_count, folder.drop_highest_count, scenario);
   const remainingTasks = ownDropped.size ? tasks.filter(task => !ownDropped.has(task.id)) : tasks;
   if (folder.bonus_cap_enabled) {
     return {
