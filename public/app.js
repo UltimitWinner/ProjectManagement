@@ -58,6 +58,7 @@ const taskModal = document.getElementById('taskModal');
 const folderModal = document.getElementById('folderModal');
 const projectModal = document.getElementById('projectModal');
 const membersModal = document.getElementById('membersModal');
+const emailPreferencesModal = document.getElementById('emailPreferencesModal');
 const fieldsModal = document.getElementById('fieldsModal');
 const dataTransferModal = document.getElementById('dataTransferModal');
 
@@ -112,6 +113,11 @@ function setupEventListeners() {
   document.getElementById('btnCloseChangePassword').addEventListener('click', closeChangePasswordModal);
   document.getElementById('btnCancelChangePassword').addEventListener('click', closeChangePasswordModal);
   document.getElementById('changePasswordForm').addEventListener('submit', handleChangePassword);
+  document.getElementById('btnEmailPreferences').addEventListener('click', openEmailPreferencesModal);
+  document.getElementById('btnCloseEmailPreferences').addEventListener('click', closeEmailPreferencesModal);
+  document.getElementById('btnCancelEmailPreferences').addEventListener('click', closeEmailPreferencesModal);
+  document.getElementById('emailEnabled').addEventListener('change', updateEmailPreferenceVisibility);
+  document.getElementById('emailPreferencesForm').addEventListener('submit', handleSaveEmailPreferences);
 
   // Project Modals
   btnNewProject.addEventListener('click', () => openProjectModal());
@@ -256,6 +262,103 @@ function setupEventListeners() {
 
 function closeChangePasswordModal() {
   document.getElementById('changePasswordModal').classList.add('hidden');
+}
+
+function closeEmailPreferencesModal() {
+  emailPreferencesModal.classList.add('hidden');
+}
+
+function populateEmailTimezoneOptions(selectedTimeZone) {
+  const select = document.getElementById('dailyDigestTimezone');
+  let zones = [];
+  try { zones = Intl.supportedValuesOf('timeZone'); } catch { }
+  const currentZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  zones = [...new Set([...zones, 'UTC', currentZone, selectedTimeZone].filter(Boolean))].sort();
+  select.innerHTML = '';
+  zones.forEach(zone => {
+    const option = document.createElement('option');
+    option.value = zone;
+    option.textContent = zone.replaceAll('_', ' ');
+    select.appendChild(option);
+  });
+  select.value = selectedTimeZone || currentZone;
+}
+
+function updateEmailPreferenceVisibility() {
+  const enabled = document.getElementById('emailEnabled').checked;
+  document.getElementById('emailDigestFields').classList.toggle('hidden', !enabled);
+  const email = document.getElementById('notificationEmail');
+  const time = document.getElementById('dailyDigestTime');
+  const timezone = document.getElementById('dailyDigestTimezone');
+  const digestControls = [
+    document.getElementById('digestLookaheadDays'),
+    document.getElementById('digestOverdue'),
+    document.getElementById('digestUndatedOpen'),
+    document.getElementById('digestWeekendDelivery'),
+    document.getElementById('digestHolidayDelivery')
+  ];
+  email.required = enabled;
+  time.required = enabled;
+  timezone.required = enabled;
+  digestControls.forEach(input => { input.required = enabled && input.id === 'digestLookaheadDays'; });
+  [email, time, timezone, ...digestControls]
+    .forEach(input => { input.disabled = !enabled; });
+}
+
+async function openEmailPreferencesModal() {
+  const status = document.getElementById('emailPreferencesStatus');
+  status.classList.add('hidden');
+  status.style.color = '';
+  try {
+    const result = await api('/api/notifications/preferences');
+    const preferences = result.preferences || {};
+    document.getElementById('emailEnabled').checked = Boolean(preferences.email_enabled);
+    document.getElementById('notificationEmail').value = preferences.email || '';
+    document.getElementById('dailyDigestTime').value = preferences.daily_digest_time || '08:00';
+    const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    populateEmailTimezoneOptions(result.hasSaved ? preferences.timezone : browserZone);
+    document.getElementById('digestOverdue').checked = preferences.include_overdue !== false;
+    document.getElementById('digestLookaheadDays').value = preferences.lookahead_days ?? 7;
+    document.getElementById('digestUndatedOpen').checked = Boolean(preferences.include_undated_open);
+    document.getElementById('digestWeekendDelivery').value = preferences.weekend_delivery || 'always';
+    document.getElementById('digestHolidayDelivery').value = preferences.holiday_delivery || 'always';
+    document.getElementById('emailSenderStatus').textContent = result.senderConfigured
+      ? 'Email delivery is configured.'
+      : 'Your preferences can be saved now. Email delivery will begin after the email provider is configured for this Worker.';
+    updateEmailPreferenceVisibility();
+    emailPreferencesModal.classList.remove('hidden');
+  } catch (err) {
+    alert('Failed to load email preferences: ' + err.message);
+  }
+}
+
+async function handleSaveEmailPreferences(event) {
+  event.preventDefault();
+  const status = document.getElementById('emailPreferencesStatus');
+  status.classList.add('hidden');
+  const payload = {
+    email_enabled: document.getElementById('emailEnabled').checked,
+    email: document.getElementById('notificationEmail').value.trim(),
+    daily_digest_time: document.getElementById('dailyDigestTime').value,
+    timezone: document.getElementById('dailyDigestTimezone').value,
+    include_overdue: document.getElementById('digestOverdue').checked,
+    lookahead_days: Number(document.getElementById('digestLookaheadDays').value),
+    include_undated_open: document.getElementById('digestUndatedOpen').checked,
+    weekend_delivery: document.getElementById('digestWeekendDelivery').value,
+    holiday_delivery: document.getElementById('digestHolidayDelivery').value
+  };
+  try {
+    const result = await api('/api/notifications/preferences', { method: 'PUT', body: JSON.stringify(payload) });
+    status.textContent = result.senderConfigured
+      ? 'Email preferences saved.'
+      : 'Preferences saved. Digests will begin sending once the email provider is configured.';
+    status.style.color = '';
+    status.classList.remove('hidden');
+  } catch (err) {
+    status.textContent = err.message;
+    status.style.color = 'var(--danger)';
+    status.classList.remove('hidden');
+  }
 }
 
 async function handleChangePassword(event) {
@@ -2946,11 +3049,10 @@ function renderGanttView() {
     }
 
     const task = entry.task;
-    const { startDate, dueDate } = taskDates.get(task.id);
     const sideCell = document.createElement('div');
     sideCell.className = 'gantt-sidebar-cell';
     sideCell.dataset.taskId = task.id;
-    sideCell.draggable = currentProjectAccess === 'edit' && !task._recurrenceParent;
+    sideCell.draggable = currentProjectAccess === 'edit' && !task.repeat_frequency;
     sideCell.style.paddingLeft = `${Math.max(1, (12 + entry.depth * 12) * yScale)}px`;
     sideCell.style.paddingRight = `${Math.max(1, 16 * yScale)}px`;
     sideCell.style.height = `${rowHeight(entry)}px`;
@@ -2971,43 +3073,51 @@ function renderGanttView() {
     row.style.flex = `0 0 ${rowHeight(entry)}px`;
     barsContainer.appendChild(row);
 
-    const clippedStart = new Date(Math.max(startDate.getTime(), minDate.getTime()));
-    const clippedEnd = new Date(Math.min(dueDate.getTime(), maxDate.getTime()));
-    const left = ganttTimeOffset(clippedStart, minDate) * dayWidth;
-    const width = Math.max(2, (ganttTimeOffset(clippedEnd, minDate) - ganttTimeOffset(clippedStart, minDate)) * dayWidth);
+    for (const occurrence of entry.occurrences || [task]) {
+      const dates = taskDates.get(occurrence.id);
+      if (!dates) continue;
+      const { startDate, dueDate } = dates;
+      const clippedStart = new Date(Math.max(startDate.getTime(), minDate.getTime()));
+      const clippedEnd = new Date(Math.min(dueDate.getTime(), maxDate.getTime()));
+      const left = ganttTimeOffset(clippedStart, minDate) * dayWidth;
+      const width = Math.max(2, (ganttTimeOffset(clippedEnd, minDate) - ganttTimeOffset(clippedStart, minDate)) * dayWidth);
 
-    const bar = document.createElement('div');
-    bar.className = 'gantt-bar-item';
-    bar.dataset.taskId = task.id;
-    bar.draggable = currentProjectAccess === 'edit' && !task._recurrenceParent;
-    applyTaskFolderColor(bar, task);
-    bar.style.color = readableTextColor(getTaskFolderColor(task) || getComputedStyle(document.documentElement).getPropertyValue('--accent-1').trim());
-    bar.style.left = `${left}px`;
-    bar.style.width = `${width}px`;
-    bar.style.top = `${yTop + Math.max(0, (rowHeight(entry) - Math.max(1, 24 * yScale)) / 2)}px`;
-    bar.style.height = `${Math.max(1, 24 * yScale)}px`;
-    bar.style.fontSize = `${Math.max(1, 12 * yScale)}px`;
-    bar.style.paddingInline = `${Math.max(0, 8 * yScale)}px`;
-    bar.style.borderRadius = `${Math.max(0, 4 * yScale)}px`;
-    if (clippedEnd <= minDate || clippedStart >= maxDate || clippedEnd <= clippedStart) bar.hidden = true;
-    bar.title = `${task.title}: ${startDate.toLocaleString()} - ${dueDate.toLocaleString()}`;
-    bar.innerHTML = `
-      <div class="gantt-bar-progress" style="width: ${task.progress}%"></div>
-      <span style="position:relative; z-index:2; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(task.title)}</span>
-    `;
+      const bar = document.createElement('div');
+      bar.className = 'gantt-bar-item';
+      bar.dataset.taskId = task.id;
+      bar.dataset.occurrenceDate = occurrence._recurrenceDate || '';
+      bar.draggable = currentProjectAccess === 'edit' && !task.repeat_frequency;
+      applyTaskFolderColor(bar, task);
+      bar.style.color = readableTextColor(getTaskFolderColor(task) || getComputedStyle(document.documentElement).getPropertyValue('--accent-1').trim());
+      bar.style.left = `${left}px`;
+      bar.style.width = `${width}px`;
+      bar.style.top = `${yTop + Math.max(0, (rowHeight(entry) - Math.max(1, 24 * yScale)) / 2)}px`;
+      bar.style.height = `${Math.max(1, 24 * yScale)}px`;
+      bar.style.fontSize = `${Math.max(1, 12 * yScale)}px`;
+      bar.style.paddingInline = `${Math.max(0, 8 * yScale)}px`;
+      bar.style.borderRadius = `${Math.max(0, 4 * yScale)}px`;
+      if (clippedEnd <= minDate || clippedStart >= maxDate || clippedEnd <= clippedStart) bar.hidden = true;
+      const occurrenceLabel = occurrence._recurrenceDate ? ` (${occurrence._recurrenceDate})` : '';
+      bar.title = `${task.title}${occurrenceLabel}: ${startDate.toLocaleString()} - ${dueDate.toLocaleString()}`;
+      bar.innerHTML = `
+        <div class="gantt-bar-progress" style="width: ${task.progress}%"></div>
+        <span style="position:relative; z-index:2; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(task.title)}</span>
+      `;
 
-    bar.addEventListener('click', () => {
-      if (Date.now() - lastGanttDropAt >= 350) openTaskModal(task);
-    });
-    bar.addEventListener('dblclick', (e) => {
-      e.stopPropagation();
-      openTaskModal(task);
-    });
-    barsContainer.appendChild(bar);
+      bar.addEventListener('click', () => {
+        if (Date.now() - lastGanttDropAt >= 350) openTaskModal(task);
+      });
+      bar.addEventListener('dblclick', (e) => {
+        e.stopPropagation();
+        openTaskModal(task);
+      });
+      barsContainer.appendChild(bar);
+    }
     yTop += rowHeight(entry);
   }
 
-  const dependencyEdges = buildGanttDependencyEdges(ganttTasks);
+  const ganttTaskParents = storedGanttRows.filter(entry => entry.type === 'task').map(entry => entry.task);
+  const dependencyEdges = buildGanttDependencyEdges(ganttTaskParents);
   if (dependencyEdges.length) {
     const namespace = 'http://www.w3.org/2000/svg';
     const defs = document.createElementNS(namespace, 'defs');
@@ -3028,7 +3138,11 @@ function renderGanttView() {
     svgLines.appendChild(defs);
 
     const rowsByTaskId = new Map([...barsContainer.querySelectorAll('.gantt-row')].map(row => [row.dataset.taskId, row]));
-    const barsByTaskId = new Map([...barsContainer.querySelectorAll('.gantt-bar-item')].map(bar => [bar.dataset.taskId, bar]));
+    const barsByTaskId = new Map();
+    for (const bar of barsContainer.querySelectorAll('.gantt-bar-item')) {
+      const current = barsByTaskId.get(bar.dataset.taskId);
+      if (!current || (current.hidden && !bar.hidden)) barsByTaskId.set(bar.dataset.taskId, bar);
+    }
     for (const { from, to } of dependencyEdges) {
       const fromRow = rowsByTaskId.get(from);
       const toRow = rowsByTaskId.get(to);

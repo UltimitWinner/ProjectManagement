@@ -11,6 +11,7 @@ MyPlan is a local-first project and coursework manager built with Hono, Cloudfla
 - Task import/export using MyPlan JSON backups and CSV profiles for Microsoft Planner, monday.com, and ClickUp.
 - BYU Learning Suite and Canvas saved-page imports using HTML files.
 - Gantt SVG export, project calendars, adjustable dates and scale, and task start/due times.
+- Opt-in daily email digests with per-user delivery time, time zone, and task filters.
 - Custom fields, multiple sort keys, and a saved light/dark appearance preference.
 
 ## Local setup
@@ -56,6 +57,14 @@ Project and task data are stored in Cloudflare D1. Schema changes are in `migrat
    ```
 
 Do not use `.dev.vars` for production secrets.
+
+## Email digests
+
+Daily digests use a Cloudflare Cron Trigger and Gmail SMTP over STARTTLS. For local development, put `GMAIL_ADDRESS`, `GMAIL_APP_PASSWORD`, and `APP_URL` in `.dev.vars`. The Gmail App Password is used only by the Worker and should not be committed or shared.
+
+For production, set `GMAIL_ADDRESS` and `GMAIL_APP_PASSWORD` as Worker secrets (for example, `npx wrangler secret put GMAIL_ADDRESS` and `npx wrangler secret put GMAIL_APP_PASSWORD`) and set `APP_URL` as a Worker variable or secret. The App Password is sensitive and must never be stored in `wrangler.toml` or source control. Gmail SMTP connects to `smtp.gmail.com` on port 587 and upgrades the connection with STARTTLS. The scheduled handler is configured in `wrangler.toml`; deploy the Worker after changing its Cron Trigger. Users can opt in and set their own address, local send time, time zone, overdue and undated-task filters, a 0–30 day due-date window, and weekend/project-holiday delivery rules in **Email Preferences**. Weekend and holiday rules are evaluated separately for each project using that project's non-working weekdays and holiday calendar; they only suppress that project's entries. On those project-specific days, delivery can include all matching entries, skip them, require a task due that day, or require any digest content (including a task due tomorrow). Repeating tasks show their next non-overdue, non-holiday occurrence when it falls within the selected digest rules. The schedule records delivery status so a digest is not sent twice on the same local day.
+
+Gmail personal accounts have sending quotas and may pause sending if usage looks unusual. This setup uses Gmail's own sender account; keep the daily digest volume within Google's current limits.
 
 ## Canvas LMS import
 

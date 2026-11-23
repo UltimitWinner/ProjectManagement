@@ -40,23 +40,34 @@ export function getFolderPath(folderId, folders) {
 
 export function buildGanttRows(tasks, folders) {
   const foldersById = new Map(folders.map(folder => [folder.id, folder]));
+  const taskGroupsById = new Map();
+  for (const occurrence of tasks) {
+    const task = occurrence._recurrenceParent || occurrence;
+    let group = taskGroupsById.get(task.id);
+    if (!group) {
+      group = { id: task.id, task, occurrences: [] };
+      taskGroupsById.set(task.id, group);
+    }
+    group.occurrences.push(occurrence);
+  }
+  const taskGroups = [...taskGroupsById.values()];
   const pathsByTaskId = new Map();
-  for (const task of tasks) {
+  for (const group of taskGroups) {
     const path = [];
     const visited = new Set();
-    let folder = foldersById.get(task.folder_id);
+    let folder = foldersById.get(group.task.folder_id);
     while (folder && !visited.has(folder.id)) {
       visited.add(folder.id);
       path.push(folder.id);
       folder = foldersById.get(folder.parent_id);
     }
-    pathsByTaskId.set(task.id, path.reverse());
+    pathsByTaskId.set(group.id, path.reverse());
   }
 
   const tasksByFolderId = new Map(folders.map(folder => [folder.id, []]));
-  for (const task of tasks) {
-    for (const folderId of pathsByTaskId.get(task.id) || []) {
-      tasksByFolderId.get(folderId)?.push(task);
+  for (const group of taskGroups) {
+    for (const folderId of pathsByTaskId.get(group.id) || []) {
+      tasksByFolderId.get(folderId)?.push(...group.occurrences);
     }
   }
 
@@ -67,12 +78,12 @@ export function buildGanttRows(tasks, folders) {
     rows.push({ type: 'folder', folder, tasks: tasksByFolderId.get(folderId) || [], depth, showLabel: true });
 
     for (let index = 0; index < segmentTasks.length;) {
-      const task = segmentTasks[index];
-      const path = pathsByTaskId.get(task.id) || [];
+      const group = segmentTasks[index];
+      const path = pathsByTaskId.get(group.id) || [];
       const folderIndex = path.indexOf(folderId);
       const childFolderId = folderIndex >= 0 ? path[folderIndex + 1] : null;
       if (!childFolderId) {
-        rows.push({ type: 'task', task, depth: path.length });
+        rows.push({ type: 'task', task: group.task, occurrences: group.occurrences, depth: path.length });
         index += 1;
         continue;
       }
@@ -91,20 +102,20 @@ export function buildGanttRows(tasks, folders) {
     }
   }
 
-  for (let index = 0; index < tasks.length;) {
-    const task = tasks[index];
-    const path = pathsByTaskId.get(task.id) || [];
+  for (let index = 0; index < taskGroups.length;) {
+    const taskGroup = taskGroups[index];
+    const path = pathsByTaskId.get(taskGroup.id) || [];
     const rootFolderId = path[0];
     if (!rootFolderId) {
-      rows.push({ type: 'task', task, depth: 0 });
+      rows.push({ type: 'task', task: taskGroup.task, occurrences: taskGroup.occurrences, depth: 0 });
       index += 1;
       continue;
     }
 
     const group = [];
     let nextIndex = index;
-    while (nextIndex < tasks.length && (pathsByTaskId.get(tasks[nextIndex].id) || [])[0] === rootFolderId) {
-      group.push(tasks[nextIndex]);
+    while (nextIndex < taskGroups.length && (pathsByTaskId.get(taskGroups[nextIndex].id) || [])[0] === rootFolderId) {
+      group.push(taskGroups[nextIndex]);
       nextIndex += 1;
     }
     appendFolderOccurrence(rootFolderId, group, 0);
@@ -183,21 +194,40 @@ function repeatOccurrence(task, occurrenceDate) {
   };
 }
 
-export function getNextTaskOccurrence(task, fromDate = localDateValue(new Date())) {
+export function getNextTaskOccurrence(task, fromDate = localDateValue(new Date()), excludedDates = []) {
   if (!task?.repeat_frequency) return task;
   const anchor = task.start_date || task.due_date;
-  if (!utcDateFromString(anchor)) return task;
-  let date = anchor;
-  let last = date;
+  const anchorDate = utcDateFromString(anchor);
+  if (!anchorDate) return task;
+  const excluded = excludedDates instanceof Set ? excludedDates : new Set(excludedDates);
+  const targetDate = utcDateFromString(fromDate);
+  let index = 0;
+  if (targetDate && targetDate > anchorDate) {
+    const amount = Math.max(1, Math.trunc(Number(task.repeat_interval) || 1));
+    const dayDifference = Math.floor((targetDate.getTime() - anchorDate.getTime()) / 86400000);
+    if (task.repeat_frequency === 'daily') index = Math.floor(dayDifference / amount);
+    else if (task.repeat_frequency === 'weekly') index = Math.floor(dayDifference / (amount * 7));
+    else if (task.repeat_frequency === 'monthly') {
+      const monthDifference = (targetDate.getUTCFullYear() - anchorDate.getUTCFullYear()) * 12
+        + targetDate.getUTCMonth() - anchorDate.getUTCMonth();
+      index = Math.max(0, Math.floor(monthDifference / amount));
+    } else if (task.repeat_frequency === 'yearly') {
+      index = Math.max(0, Math.floor((targetDate.getUTCFullYear() - anchorDate.getUTCFullYear()) / amount));
+    }
+  }
+  let date = repeatDateAt(anchor, task.repeat_frequency, task.repeat_interval, index);
+  let last = null;
   // Every interval is calculated from the original date, preserving a monthly
   // rule such as the 31st even when an intervening month has fewer days.
-  for (let count = 0; count < 20000 && date <= (task.repeat_until || '9999-12-31'); count += 1) {
+  for (let count = index; count < 20000 && date && date <= (task.repeat_until || '9999-12-31'); count += 1) {
     last = date;
-    if (date >= fromDate) return { ...repeatOccurrence(task, date), id: task.id };
+    if (date >= fromDate && !excluded.has(date)) return { ...repeatOccurrence(task, date), id: task.id };
     const next = repeatDateAt(anchor, task.repeat_frequency, task.repeat_interval, count + 1);
     if (!next || next <= date) break;
     date = next;
   }
+  if (excluded.size) return null;
+  if (!last) return null;
   return { ...repeatOccurrence(task, last), id: task.id };
 }
 
