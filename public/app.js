@@ -6,6 +6,7 @@ import { canvasCourseToBackup, canvasCourseLabel, parseCanvasAssignmentsHtml, de
 // State
 let currentUser = null; // { id, username, name, systemRole }
 let currentProjectAccess = 'none'; // 'none', 'view', 'edit', or 'creator' for the current project
+let projectSelectionVersion = 0;
 let projects = [];
 let currentProjectId = new URLSearchParams(location.search).get('canvas_project') || null;
 let currentProject = null;
@@ -1277,25 +1278,36 @@ async function loadProjects() {
 }
 
 async function selectProject(id) {
-  if (currentProjectId !== id) {
+  const selectionVersion = ++projectSelectionVersion;
+  const projectChanged = currentProjectId !== id;
+  if (projectChanged) {
     selectedStatsFolderId = undefined;
     selectedTaskIds.clear();
     canvasStatus = null;
     canvasCourses = [];
+    tasks = [];
+    folders = [];
+    customFields = [];
   }
   currentProjectId = id;
   currentProject = projects.find(p => p.id === id);
   if (!currentProject) return;
+  currentProjectAccess = currentProject.user_access_level || 'none';
   loadListPreferences();
   loadCollapsedFolders();
+
+  if (projectChanged) renderCurrentView();
 
   // Retrieve project details and verified user access level for this specific project
   try {
     const projDetail = await api(`/api/projects/${id}`);
+    if (selectionVersion !== projectSelectionVersion || currentProjectId !== id) return;
     currentProjectAccess = projDetail.user_access_level || 'none';
   } catch {
+    if (selectionVersion !== projectSelectionVersion || currentProjectId !== id) return;
     currentProjectAccess = 'none';
   }
+  if (selectionVersion !== projectSelectionVersion || currentProjectId !== id) return;
 
   currentProjectTitle.textContent = currentProject.name;
   currentProjectDesc.textContent = currentProject.description || 'No description provided';
@@ -1357,9 +1369,11 @@ async function selectProject(id) {
   }
 
   renderSidebarProjects();
-  await loadFolders();
-  await loadCustomFields();
-  await loadTasks();
+  await loadFolders(id, selectionVersion);
+  if (selectionVersion !== projectSelectionVersion || currentProjectId !== id) return;
+  await loadCustomFields(id, selectionVersion);
+  if (selectionVersion !== projectSelectionVersion || currentProjectId !== id) return;
+  await loadTasks(id, selectionVersion);
 }
 
 function updateProjectPermissionsButton() {
@@ -1368,19 +1382,25 @@ function updateProjectPermissionsButton() {
   btnManageMembers.classList.toggle('hidden', !canManage);
 }
 
-async function loadFolders() {
-  if (!currentProjectId || currentProjectAccess === 'none') return;
-  folders = await api(`/api/projects/${currentProjectId}/folders`);
+async function loadFolders(projectId = currentProjectId, selectionVersion = projectSelectionVersion) {
+  if (!projectId || currentProjectAccess === 'none') return;
+  const result = await api(`/api/projects/${projectId}/folders`);
+  if (projectId !== currentProjectId || selectionVersion !== projectSelectionVersion) return;
+  folders = result;
 }
 
-async function loadCustomFields() {
-  if (!currentProjectId || currentProjectAccess === 'none') return;
-  customFields = await api(`/api/projects/${currentProjectId}/fields`);
+async function loadCustomFields(projectId = currentProjectId, selectionVersion = projectSelectionVersion) {
+  if (!projectId || currentProjectAccess === 'none') return;
+  const result = await api(`/api/projects/${projectId}/fields`);
+  if (projectId !== currentProjectId || selectionVersion !== projectSelectionVersion) return;
+  customFields = result;
 }
 
-async function loadTasks() {
-  if (!currentProjectId || currentProjectAccess === 'none') return;
-  tasks = await api(`/api/projects/${currentProjectId}/tasks`);
+async function loadTasks(projectId = currentProjectId, selectionVersion = projectSelectionVersion) {
+  if (!projectId || currentProjectAccess === 'none') return;
+  const result = await api(`/api/projects/${projectId}/tasks`);
+  if (projectId !== currentProjectId || selectionVersion !== projectSelectionVersion) return;
+  tasks = result;
   renderCurrentView();
 }
 
@@ -2760,7 +2780,9 @@ function renderBoardView() {
 
 // ----------------- 3. List View -----------------
 function sortedTasks() {
-  return sortTasks(excludeDoneTasks(tasks, excludeDoneFromList).map(getNextTaskOccurrence), folders, listSortState, projectStatusOptions());
+  // Pass only the task. Array.map otherwise supplies the row index as the
+  // second argument, which getNextTaskOccurrence interprets as fromDate.
+  return sortTasks(excludeDoneTasks(tasks, excludeDoneFromList).map(task => getNextTaskOccurrence(task)), folders, listSortState, projectStatusOptions());
 }
 
 function setExcludeDoneFilter(enabled) {
