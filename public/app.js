@@ -750,7 +750,7 @@ function getGanttPreferences() {
     const saved = JSON.parse(localStorage.getItem(getGanttPreferenceKey()) || '{}');
     return {
       dayWidth: Math.max(16, Math.min(160, Number(saved.dayWidth) || 40)),
-      rowHeight: Math.max(24, Math.min(80, Number(saved.rowHeight) || 42)),
+      rowHeight: Math.max(1, Math.min(80, Number(saved.rowHeight) || 42)),
       sidebarWidth: Math.max(180, Math.min(600, Number(saved.sidebarWidth) || 250)),
       sidebarHidden: Boolean(saved.sidebarHidden),
       collapsedFolders: Array.isArray(saved.collapsedFolders) ? saved.collapsedFolders.filter(id => typeof id === 'string') : [],
@@ -2728,6 +2728,8 @@ function renderGanttView() {
   const svgLines = document.getElementById('ganttSvgLines');
   const viewport = document.getElementById('ganttViewport');
   const preferences = getGanttPreferences();
+  const yScale = preferences.rowHeight / 42;
+  viewport.style.setProperty('--gantt-y-scale', String(yScale));
   const ganttTasks = sortTasks(excludeDoneTasks(tasks, excludeDoneFromList), folders, listSortState, projectStatusOptions());
   const storedGanttRows = buildGanttRows(ganttTasks, folders);
   const collapsedFolders = new Set(preferences.collapsedFolders);
@@ -2790,7 +2792,9 @@ function renderGanttView() {
   header.style.width = `${chartWidth}px`;
   barsContainer.style.width = `${chartWidth}px`;
   svgLines.style.width = `${chartWidth}px`;
-  const rowHeight = entry => entry.type === 'folder' ? 18 : preferences.rowHeight;
+  const rowHeight = entry => entry.type === 'folder'
+    ? Math.max(1, Math.round(18 * yScale))
+    : preferences.rowHeight;
   const chartHeight = ganttRows.reduce((height, entry) => height + rowHeight(entry), 0);
   barsContainer.style.height = `${chartHeight}px`;
   svgLines.style.height = `${chartHeight}px`;
@@ -2846,9 +2850,10 @@ function renderGanttView() {
       sideCell.setAttribute('role', 'button');
       sideCell.setAttribute('aria-expanded', String(!collapsedFolders.has(folder.id)));
       sideCell.classList.toggle('collapsed', collapsedFolders.has(folder.id));
-      sideCell.style.paddingLeft = `${12 + entry.depth * 12}px`;
+      sideCell.style.paddingLeft = `${Math.max(1, (12 + entry.depth * 12) * yScale)}px`;
       sideCell.style.height = `${rowHeight(entry)}px`;
       sideCell.style.flexBasis = `${rowHeight(entry)}px`;
+      sideCell.style.fontSize = `${Math.max(1, 9.28 * yScale)}px`;
       sideCell.style.setProperty('--folder-color', color);
       sideCell.textContent = entry.showLabel ? folder.name : '';
       sideCell.title = getFolderPath(folder.id, folders) || folder.name;
@@ -2857,6 +2862,8 @@ function renderGanttView() {
       const row = document.createElement('div');
       row.className = 'gantt-folder-row';
       row.dataset.folderId = folder.id;
+      row.style.height = `${rowHeight(entry)}px`;
+      row.style.flex = `0 0 ${rowHeight(entry)}px`;
       const dates = entry.tasks.map(task => taskDates.get(task.id)).filter(Boolean);
       if (dates.length) {
         const firstDate = new Date(Math.min(...dates.map(date => date.startDate.getTime())));
@@ -2869,6 +2876,8 @@ function renderGanttView() {
         span.className = 'gantt-folder-span';
         span.style.left = `${left}px`;
         span.style.width = `${width}px`;
+        span.style.top = `${12 * yScale}px`;
+        span.style.height = `${Math.max(1, 2 * yScale)}px`;
         span.style.setProperty('--folder-color', color);
         if (clippedEnd <= minDate || clippedStart >= maxDate || clippedEnd <= clippedStart) span.hidden = true;
         span.title = `${getFolderPath(folder.id, folders) || folder.name}: ${firstDate.toLocaleDateString()} – ${lastDate.toLocaleDateString()}`;
@@ -2876,6 +2885,9 @@ function renderGanttView() {
           const label = document.createElement('span');
           label.className = 'gantt-folder-span-label';
           label.textContent = folder.name;
+          label.style.fontSize = `${Math.max(1, 8.32 * yScale)}px`;
+          label.style.lineHeight = `${Math.max(1, 10 * yScale)}px`;
+          label.style.top = `${-Math.max(1, 11 * yScale)}px`;
           span.appendChild(label);
         }
         row.appendChild(span);
@@ -2891,9 +2903,11 @@ function renderGanttView() {
     sideCell.className = 'gantt-sidebar-cell';
     sideCell.dataset.taskId = task.id;
     sideCell.draggable = currentProjectAccess === 'edit';
-    sideCell.style.paddingLeft = `${12 + entry.depth * 12}px`;
+    sideCell.style.paddingLeft = `${Math.max(1, (12 + entry.depth * 12) * yScale)}px`;
+    sideCell.style.paddingRight = `${Math.max(1, 16 * yScale)}px`;
     sideCell.style.height = `${rowHeight(entry)}px`;
     sideCell.style.flexBasis = `${rowHeight(entry)}px`;
+    sideCell.style.fontSize = `${Math.max(1, 13.6 * yScale)}px`;
     sideCell.textContent = task.title;
     sideCell.title = `${task.title} (Double click to edit)`;
     sideCell.addEventListener('click', () => {
@@ -2922,7 +2936,11 @@ function renderGanttView() {
     bar.style.color = readableTextColor(getTaskFolderColor(task) || getComputedStyle(document.documentElement).getPropertyValue('--accent-1').trim());
     bar.style.left = `${left}px`;
     bar.style.width = `${width}px`;
-    bar.style.top = `${yTop + Math.max(3, (preferences.rowHeight - 24) / 2)}px`;
+    bar.style.top = `${yTop + Math.max(0, (rowHeight(entry) - Math.max(1, 24 * yScale)) / 2)}px`;
+    bar.style.height = `${Math.max(1, 24 * yScale)}px`;
+    bar.style.fontSize = `${Math.max(1, 12 * yScale)}px`;
+    bar.style.paddingInline = `${Math.max(0, 8 * yScale)}px`;
+    bar.style.borderRadius = `${Math.max(0, 4 * yScale)}px`;
     if (clippedEnd <= minDate || clippedStart >= maxDate || clippedEnd <= clippedStart) bar.hidden = true;
     bar.title = `${task.title}: ${startDate.toLocaleString()} - ${dueDate.toLocaleString()}`;
     bar.innerHTML = `

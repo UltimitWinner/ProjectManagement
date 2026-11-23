@@ -1773,8 +1773,8 @@ body {
 .gantt-folder-sidebar-cell::before {
   content: '▾';
   display: inline-block;
-  flex: 0 0 0.75rem;
-  margin-left: -0.75rem;
+  flex: 0 0 max(1px, calc(12px * var(--gantt-y-scale, 1)));
+  margin-left: max(-12px, calc(-12px * var(--gantt-y-scale, 1)));
   color: var(--accent-2);
 }
 
@@ -1792,7 +1792,7 @@ body {
   top: 12px;
   height: 2px;
   min-width: 2px;
-  border-top: 2px solid var(--folder-color, var(--accent-2));
+  border-top: max(1px, calc(2px * var(--gantt-y-scale, 1))) solid var(--folder-color, var(--accent-2));
   opacity: 0.58;
   z-index: 4;
 }
@@ -1818,8 +1818,9 @@ body {
   flex: 0 0 42px;
   display: flex;
   align-items: center;
-  padding: 0 1rem;
+  padding: 0 max(1px, calc(16px * var(--gantt-y-scale, 1)));
   font-size: 0.85rem;
+  line-height: max(1px, calc(16px * var(--gantt-y-scale, 1)));
   font-weight: 500;
   border-bottom: 1px solid var(--line-subtle);
   white-space: nowrap;
@@ -1858,15 +1859,15 @@ body {
 
 .gantt-bar-item {
   position: absolute;
-  height: 24px;
-  top: 9px;
+  height: max(1px, calc(24px * var(--gantt-y-scale, 1)));
   background-color: var(--folder-color, var(--accent));
-  border-radius: 4px;
+  border-radius: max(0px, calc(4px * var(--gantt-y-scale, 1)));
   cursor: grab;
   display: flex;
   align-items: center;
-  padding: 0 8px;
+  padding: 0 max(0px, calc(8px * var(--gantt-y-scale, 1)));
   font-size: 0.75rem;
+  line-height: max(1px, calc(14px * var(--gantt-y-scale, 1)));
   color: #fff;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
   white-space: nowrap;

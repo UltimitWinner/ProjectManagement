@@ -344,10 +344,24 @@
         <div class="gantt-header-bar">
           <div class="gantt-controls">
             <label for="ganttDayWidth">Day width</label>
-            <input type="range" id="ganttDayWidth" min="16" max="160" step="4" value="40">
+            <input type="range" id="ganttDayWidth" min="16" max="160" step="4" value="40" list="ganttDayWidthStops">
+            <datalist id="ganttDayWidthStops">
+              <option value="16" label="16"></option><option value="24" label="24"></option>
+              <option value="32" label="32"></option><option value="40" label="Default 40"></option>
+              <option value="48" label="48"></option><option value="64" label="64"></option>
+              <option value="80" label="80"></option><option value="120" label="120"></option>
+              <option value="160" label="160"></option>
+            </datalist>
             <output id="ganttDayWidthValue">40 px</output>
-            <label for="ganttRowHeight">Task row height</label>
-            <input type="range" id="ganttRowHeight" min="24" max="80" step="2" value="42">
+            <label for="ganttRowHeight">Vertical scale</label>
+            <input type="range" id="ganttRowHeight" min="1" max="80" step="1" value="42" list="ganttRowHeightStops">
+            <datalist id="ganttRowHeightStops">
+              <option value="1" label="1"></option><option value="8" label="8"></option>
+              <option value="16" label="16"></option><option value="24" label="24"></option>
+              <option value="32" label="32"></option><option value="42" label="Default 42"></option>
+              <option value="54" label="54"></option><option value="66" label="66"></option>
+              <option value="80" label="80"></option>
+            </datalist>
             <output id="ganttRowHeightValue">42 px</output>
             <label for="ganttRangeStart">From</label>
             <input type="date" id="ganttRangeStart" aria-label="Gantt range start">
