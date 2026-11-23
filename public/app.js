@@ -104,6 +104,14 @@ function setupEventListeners() {
     }
   }));
   btnLogout.addEventListener('click', handleLogout);
+  document.getElementById('btnChangePassword').addEventListener('click', () => {
+    document.getElementById('changePasswordForm').reset();
+    document.getElementById('changePasswordError').classList.add('hidden');
+    document.getElementById('changePasswordModal').classList.remove('hidden');
+  });
+  document.getElementById('btnCloseChangePassword').addEventListener('click', closeChangePasswordModal);
+  document.getElementById('btnCancelChangePassword').addEventListener('click', closeChangePasswordModal);
+  document.getElementById('changePasswordForm').addEventListener('submit', handleChangePassword);
 
   // Project Modals
   btnNewProject.addEventListener('click', () => openProjectModal());
@@ -132,6 +140,7 @@ function setupEventListeners() {
   taskForm.addEventListener('submit', handleSaveTask);
   document.getElementById('btnDeleteTask').addEventListener('click', handleDeleteTask);
   document.getElementById('taskStatus').addEventListener('change', event => populateTaskStatusOptions(event.target.value));
+  document.getElementById('taskFolder').addEventListener('change', updateTaskGradeFieldVisibility);
 
   // Progress range label
   document.getElementById('taskProgress').addEventListener('input', (e) => {
@@ -151,6 +160,13 @@ function setupEventListeners() {
     document.getElementById('ganttDayWidthValue').textContent = `${event.target.value} px`;
     const preferences = getGanttPreferences();
     preferences.dayWidth = Number(event.target.value);
+    saveGanttPreferences(preferences);
+    renderGanttView();
+  });
+  document.getElementById('ganttRowHeight').addEventListener('input', event => {
+    document.getElementById('ganttRowHeightValue').textContent = `${event.target.value} px`;
+    const preferences = getGanttPreferences();
+    preferences.rowHeight = Number(event.target.value);
     saveGanttPreferences(preferences);
     renderGanttView();
   });
@@ -181,6 +197,17 @@ function setupEventListeners() {
   document.getElementById('exportGanttSvg').addEventListener('click', exportGanttSvg);
   const ganttSidebar = document.getElementById('ganttSidebarCol');
   const ganttChart = document.getElementById('ganttChartArea');
+  ganttSidebar.addEventListener('click', event => {
+    const folderCell = event.target.closest('.gantt-folder-sidebar-cell');
+    if (folderCell) toggleGanttFolder(folderCell.dataset.folderId);
+  });
+  ganttSidebar.addEventListener('keydown', event => {
+    const folderCell = event.target.closest('.gantt-folder-sidebar-cell');
+    if (folderCell && ['Enter', ' '].includes(event.key)) {
+      event.preventDefault();
+      toggleGanttFolder(folderCell.dataset.folderId);
+    }
+  });
   ganttSidebar.addEventListener('scroll', () => {
     if (ganttChart.scrollTop !== ganttSidebar.scrollTop) ganttChart.scrollTop = ganttSidebar.scrollTop;
   });
@@ -220,6 +247,36 @@ function setupEventListeners() {
   ganttViewport.addEventListener('dragover', handleGanttDragOver);
   ganttViewport.addEventListener('dragleave', handleGanttDragLeave);
   ganttViewport.addEventListener('drop', handleGanttDrop);
+}
+
+function closeChangePasswordModal() {
+  document.getElementById('changePasswordModal').classList.add('hidden');
+}
+
+async function handleChangePassword(event) {
+  event.preventDefault();
+  const error = document.getElementById('changePasswordError');
+  error.classList.add('hidden');
+  const newPassword = document.getElementById('newPassword').value;
+  if (newPassword !== document.getElementById('confirmNewPassword').value) {
+    error.textContent = 'The new passwords do not match.';
+    error.classList.remove('hidden');
+    return;
+  }
+  try {
+    await api('/api/auth/change-password', {
+      method: 'POST',
+      body: JSON.stringify({
+        current_password: document.getElementById('currentPassword').value,
+        new_password: newPassword
+      })
+    });
+    closeChangePasswordModal();
+    alert('Password changed. Other sessions have been signed out.');
+  } catch (err) {
+    error.textContent = err.message;
+    error.classList.remove('hidden');
+  }
 }
 
 function applyProjectsSidebarPreference() {
@@ -693,13 +750,15 @@ function getGanttPreferences() {
     const saved = JSON.parse(localStorage.getItem(getGanttPreferenceKey()) || '{}');
     return {
       dayWidth: Math.max(16, Math.min(160, Number(saved.dayWidth) || 40)),
+      rowHeight: Math.max(24, Math.min(80, Number(saved.rowHeight) || 42)),
       sidebarWidth: Math.max(180, Math.min(600, Number(saved.sidebarWidth) || 250)),
       sidebarHidden: Boolean(saved.sidebarHidden),
+      collapsedFolders: Array.isArray(saved.collapsedFolders) ? saved.collapsedFolders.filter(id => typeof id === 'string') : [],
       rangeStart: typeof saved.rangeStart === 'string' ? saved.rangeStart : '',
       rangeEnd: typeof saved.rangeEnd === 'string' ? saved.rangeEnd : '',
     };
   } catch {
-    return { dayWidth: 40, sidebarWidth: 250, sidebarHidden: false, rangeStart: '', rangeEnd: '' };
+    return { dayWidth: 40, rowHeight: 42, sidebarWidth: 250, sidebarHidden: false, collapsedFolders: [], rangeStart: '', rangeEnd: '' };
   }
 }
 
@@ -710,6 +769,16 @@ function saveGanttPreferences(preferences) {
 function toggleGanttSidebar() {
   const preferences = getGanttPreferences();
   preferences.sidebarHidden = !preferences.sidebarHidden;
+  saveGanttPreferences(preferences);
+  renderGanttView();
+}
+
+function toggleGanttFolder(folderId) {
+  const preferences = getGanttPreferences();
+  const collapsed = new Set(preferences.collapsedFolders);
+  if (collapsed.has(folderId)) collapsed.delete(folderId);
+  else collapsed.add(folderId);
+  preferences.collapsedFolders = [...collapsed];
   saveGanttPreferences(preferences);
   renderGanttView();
 }
@@ -1593,7 +1662,8 @@ async function importTasks() {
               weight_percent: Number(folder.weight_percent) || 0, drop_lowest_count: Number(folder.drop_lowest_count) || 0,
               drop_highest_count: Number(folder.drop_highest_count) || 0,
               target_grade: Number(folder.target_grade) || 100,
-              bonus_cap_enabled: Boolean(folder.bonus_cap_enabled)
+              bonus_cap_enabled: Boolean(folder.bonus_cap_enabled),
+              ...(folder.grade_enabled === undefined ? {} : { grade_enabled: Boolean(folder.grade_enabled) })
             })
           });
           folders.push(made); id = made.id;
@@ -1604,20 +1674,23 @@ async function importTasks() {
           const nextDropHighest = isCourseRoot ? (Number(match.drop_highest_count) || 0) : (Number(folder.drop_highest_count) || 0);
           const nextName = String(folder.name || match.name);
           const nextBonusCap = isCourseRoot ? Boolean(match.bonus_cap_enabled) : Boolean(folder.bonus_cap_enabled);
+          const nextGradeEnabled = folder.grade_enabled === undefined ? Boolean(match.grade_enabled) : Boolean(folder.grade_enabled);
           if (match.name !== nextName || Number(match.weight_percent) !== nextWeight
             || Number(match.drop_lowest_count) !== nextDropLowest || Number(match.drop_highest_count) !== nextDropHighest
-            || Boolean(match.bonus_cap_enabled) !== nextBonusCap) {
+            || Boolean(match.bonus_cap_enabled) !== nextBonusCap
+            || (folder.grade_enabled !== undefined && Boolean(match.grade_enabled) !== nextGradeEnabled)) {
             await api(`/api/folders/${match.id}`, {
               method: 'PUT',
               body: JSON.stringify({
                 name: nextName, parent_id: parentId, description: match.description || '', color: match.color || '',
                 weight_percent: nextWeight, drop_lowest_count: nextDropLowest, drop_highest_count: nextDropHighest,
                 target_grade: Number(match.target_grade) || 100,
-                bonus_cap_enabled: nextBonusCap
+                bonus_cap_enabled: nextBonusCap,
+                grade_enabled: nextGradeEnabled
               })
             });
             Object.assign(match, { name: nextName, weight_percent: nextWeight, drop_lowest_count: nextDropLowest,
-              drop_highest_count: nextDropHighest, bonus_cap_enabled: nextBonusCap });
+              drop_highest_count: nextDropHighest, bonus_cap_enabled: nextBonusCap, grade_enabled: nextGradeEnabled });
             updatedFolderCount += 1;
           }
         }
@@ -1634,6 +1707,38 @@ async function importTasks() {
         _sourceDependencies: task.dependencies || [],
         _json: true
       })).filter(row => String(row.title || '').trim());
+    }
+
+    const gradeValueNames = [
+      ['earned_points', 'Earned Points'],
+      ['max_points', 'Maximum Points'],
+      ['grade', 'Grade Override (%)']
+    ];
+    const rowsNeedingGradeCustomFields = normalizedRows.filter(row => {
+      const hasGrade = gradeValueNames.some(([key]) => row[key] !== null && row[key] !== undefined && row[key] !== '');
+      if (!hasGrade) return false;
+      if (data.type !== 'csv' && row.folder_id) return !isFolderGraded(folderSourceMap.get(row.folder_id) || '');
+      const path = String(row.folder_path || row.folder || row.bucket_name || row.bucket || row.group || row.list_name || row.list || '')
+        .split(/\s*(?:\/|>|\\|\|)\s*/).filter(Boolean);
+      let parentId = null;
+      let folderId = '';
+      for (const name of path) {
+        const folder = folders.find(item => (item.parent_id || null) === parentId && item.name.toLowerCase() === name.toLowerCase());
+        if (!folder) { folderId = ''; break; }
+        folderId = folder.id;
+        parentId = folder.id;
+      }
+      return !isFolderGraded(folderId);
+    });
+    const presentGradeFields = rowsNeedingGradeCustomFields.length
+      ? gradeValueNames.filter(([key]) => rowsNeedingGradeCustomFields.some(row => row[key] !== null && row[key] !== undefined && row[key] !== ''))
+      : [];
+    if (presentGradeFields.length) {
+      const gradeFields = await ensureImportCustomFields(
+        presentGradeFields.map(([, name]) => name),
+        presentGradeFields.map(([, name]) => ({ name, field_type: 'number' }))
+      );
+      customValueIds = { ...customValueIds, ...gradeFields };
     }
 
     const folderCache = [...folders];
@@ -1668,6 +1773,14 @@ async function importTasks() {
         row._sourceDependencies = row._sourceDependencies || [];
       } else {
         payload = makeTaskImportPayload(row, data.profile, folderId, customValueIds);
+      }
+      if (!isFolderGraded(folderId)) {
+        for (const [key, name] of gradeValueNames) {
+          const value = row[key] ?? payload[key];
+          const fieldId = customValueIds[normalizeHeader(name)];
+          if (fieldId && value !== null && value !== undefined && value !== '') payload.custom_values[fieldId] = String(value);
+          if (key !== 'weight_override') payload[key] = null;
+        }
       }
       const sourceId = row._sourceId || payload._sourceId || row.id;
       let existing = null;
@@ -2606,7 +2719,18 @@ function renderGanttView() {
   const viewport = document.getElementById('ganttViewport');
   const preferences = getGanttPreferences();
   const ganttTasks = sortTasks(excludeDoneTasks(tasks, excludeDoneFromList), folders, listSortState, projectStatusOptions());
-  const ganttRows = buildGanttRows(ganttTasks, folders);
+  const storedGanttRows = buildGanttRows(ganttTasks, folders);
+  const collapsedFolders = new Set(preferences.collapsedFolders);
+  const ganttRows = [];
+  let collapsedDepth = null;
+  for (const row of storedGanttRows) {
+    if (collapsedDepth !== null) {
+      if (row.type !== 'folder' || row.depth > collapsedDepth) continue;
+      collapsedDepth = null;
+    }
+    ganttRows.push(row);
+    if (row.type === 'folder' && collapsedFolders.has(row.folder.id)) collapsedDepth = row.depth;
+  }
   document.getElementById('excludeDoneTasksGantt').checked = excludeDoneFromList;
 
   sidebar.style.width = `${preferences.sidebarWidth}px`;
@@ -2614,6 +2738,8 @@ function renderGanttView() {
   document.getElementById('toggleGanttSidebar').textContent = preferences.sidebarHidden ? 'Show task names' : 'Hide task names';
   document.getElementById('ganttDayWidth').value = String(preferences.dayWidth);
   document.getElementById('ganttDayWidthValue').textContent = `${preferences.dayWidth} px`;
+  document.getElementById('ganttRowHeight').value = String(preferences.rowHeight);
+  document.getElementById('ganttRowHeightValue').textContent = `${preferences.rowHeight} px`;
   document.getElementById('ganttRangeStart').value = preferences.rangeStart;
   document.getElementById('ganttRangeEnd').value = preferences.rangeEnd;
 
@@ -2654,7 +2780,7 @@ function renderGanttView() {
   header.style.width = `${chartWidth}px`;
   barsContainer.style.width = `${chartWidth}px`;
   svgLines.style.width = `${chartWidth}px`;
-  const rowHeight = entry => entry.type === 'folder' ? 18 : 42;
+  const rowHeight = entry => entry.type === 'folder' ? 18 : preferences.rowHeight;
   const chartHeight = ganttRows.reduce((height, entry) => height + rowHeight(entry), 0);
   barsContainer.style.height = `${chartHeight}px`;
   svgLines.style.height = `${chartHeight}px`;
@@ -2705,7 +2831,14 @@ function renderGanttView() {
       const color = getFolderDisplayColor(folder);
       const sideCell = document.createElement('div');
       sideCell.className = 'gantt-folder-sidebar-cell';
+      sideCell.dataset.folderId = folder.id;
+      sideCell.tabIndex = 0;
+      sideCell.setAttribute('role', 'button');
+      sideCell.setAttribute('aria-expanded', String(!collapsedFolders.has(folder.id)));
+      sideCell.classList.toggle('collapsed', collapsedFolders.has(folder.id));
       sideCell.style.paddingLeft = `${12 + entry.depth * 12}px`;
+      sideCell.style.height = `${rowHeight(entry)}px`;
+      sideCell.style.flexBasis = `${rowHeight(entry)}px`;
       sideCell.style.setProperty('--folder-color', color);
       sideCell.textContent = entry.showLabel ? folder.name : '';
       sideCell.title = getFolderPath(folder.id, folders) || folder.name;
@@ -2713,6 +2846,7 @@ function renderGanttView() {
 
       const row = document.createElement('div');
       row.className = 'gantt-folder-row';
+      row.dataset.folderId = folder.id;
       const dates = entry.tasks.map(task => taskDates.get(task.id)).filter(Boolean);
       if (dates.length) {
         const firstDate = new Date(Math.min(...dates.map(date => date.startDate.getTime())));
@@ -2748,6 +2882,8 @@ function renderGanttView() {
     sideCell.dataset.taskId = task.id;
     sideCell.draggable = currentProjectAccess === 'edit';
     sideCell.style.paddingLeft = `${12 + entry.depth * 12}px`;
+    sideCell.style.height = `${rowHeight(entry)}px`;
+    sideCell.style.flexBasis = `${rowHeight(entry)}px`;
     sideCell.textContent = task.title;
     sideCell.title = `${task.title} (Double click to edit)`;
     sideCell.addEventListener('click', () => {
@@ -2759,6 +2895,8 @@ function renderGanttView() {
     const row = document.createElement('div');
     row.className = 'gantt-row';
     row.dataset.taskId = task.id;
+    row.style.height = `${rowHeight(entry)}px`;
+    row.style.flex = `0 0 ${rowHeight(entry)}px`;
     barsContainer.appendChild(row);
 
     const clippedStart = new Date(Math.max(startDate.getTime(), minDate.getTime()));
@@ -2774,7 +2912,7 @@ function renderGanttView() {
     bar.style.color = readableTextColor(getTaskFolderColor(task) || getComputedStyle(document.documentElement).getPropertyValue('--accent-1').trim());
     bar.style.left = `${left}px`;
     bar.style.width = `${width}px`;
-    bar.style.top = `${yTop + 9}px`;
+    bar.style.top = `${yTop + Math.max(3, (preferences.rowHeight - 24) / 2)}px`;
     if (clippedEnd <= minDate || clippedStart >= maxDate || clippedEnd <= clippedStart) bar.hidden = true;
     bar.title = `${task.title}: ${startDate.toLocaleString()} - ${dueDate.toLocaleString()}`;
     bar.innerHTML = `
@@ -2875,6 +3013,23 @@ function populateTaskFolderDropdown(selectedFolderId = '') {
   folders.filter(f => !f.parent_id).forEach(root => addFolderOption(root, 0));
 }
 
+function isFolderGraded(folderId) {
+  const foldersById = new Map(folders.map(folder => [folder.id, folder]));
+  const visited = new Set();
+  let folder = foldersById.get(folderId);
+  while (folder && !visited.has(folder.id)) {
+    if (Boolean(folder.grade_enabled)) return true;
+    visited.add(folder.id);
+    folder = foldersById.get(folder.parent_id);
+  }
+  return false;
+}
+
+function updateTaskGradeFieldVisibility() {
+  const visible = isFolderGraded(document.getElementById('taskFolder').value);
+  document.querySelectorAll('.task-grade-fields').forEach(field => field.classList.toggle('hidden', !visible));
+}
+
 function openTaskModal(task = null, presetFolderId = '') {
   document.getElementById('taskModalTitle').textContent = task ? 'Edit Task' : 'Create Task';
   document.getElementById('taskId').value = task ? task.id : '';
@@ -2900,6 +3055,7 @@ function openTaskModal(task = null, presetFolderId = '') {
   renderTaskCustomFields(task);
 
   populateTaskFolderDropdown(task?.folder_id || presetFolderId);
+  updateTaskGradeFieldVisibility();
 
   const btnDelete = document.getElementById('btnDeleteTask');
   if (task && currentProjectAccess === 'edit') {
@@ -3122,6 +3278,7 @@ function openFolderModal(folderToEdit = null, presetParentId = '') {
     document.getElementById('folderDropLowest').value = Number(folderToEdit.drop_lowest_count) || 0;
     document.getElementById('folderDropHighest').value = Number(folderToEdit.drop_highest_count) || 0;
     document.getElementById('folderBonusCap').checked = Boolean(folderToEdit.bonus_cap_enabled);
+    document.getElementById('folderGradeEnabled').checked = Boolean(folderToEdit.grade_enabled);
     document.getElementById('folderColor').value = folderToEdit.color || '#25c2fd';
     populateParentFolderDropdown(folderToEdit.parent_id, folderToEdit.id);
     document.getElementById('btnDeleteFolder').classList.remove('hidden');
@@ -3134,6 +3291,7 @@ function openFolderModal(folderToEdit = null, presetParentId = '') {
     document.getElementById('folderDropLowest').value = '0';
     document.getElementById('folderDropHighest').value = '0';
     document.getElementById('folderBonusCap').checked = false;
+    document.getElementById('folderGradeEnabled').checked = false;
     document.getElementById('folderColor').value = '#25c2fd';
     populateParentFolderDropdown(presetParentId);
     document.getElementById('btnDeleteFolder').classList.add('hidden');
@@ -3159,9 +3317,10 @@ async function handleSaveFolder(e) {
   const drop_lowest_count = Math.max(0, Math.floor(Number(document.getElementById('folderDropLowest').value) || 0));
   const drop_highest_count = Math.max(0, Math.floor(Number(document.getElementById('folderDropHighest').value) || 0));
   const bonus_cap_enabled = document.getElementById('folderBonusCap').checked;
+  const grade_enabled = document.getElementById('folderGradeEnabled').checked;
   const color = document.getElementById('folderColor').value;
 
-  const payload = { name, parent_id, description, weight_percent, drop_lowest_count, drop_highest_count, bonus_cap_enabled, color };
+  const payload = { name, parent_id, description, weight_percent, drop_lowest_count, drop_highest_count, bonus_cap_enabled, grade_enabled, color };
 
   try {
     if (folderId) {

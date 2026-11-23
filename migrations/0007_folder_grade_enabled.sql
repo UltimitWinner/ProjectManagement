@@ -1,0 +1,1 @@
+ALTER TABLE folders ADD COLUMN grade_enabled INTEGER NOT NULL DEFAULT 0;

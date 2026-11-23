@@ -233,6 +233,7 @@ async function initializeTables(db) {
       bonus_cap_enabled INTEGER NOT NULL DEFAULT 0,
       drop_lowest_count INTEGER NOT NULL DEFAULT 0,
       drop_highest_count INTEGER NOT NULL DEFAULT 0,
+      grade_enabled INTEGER NOT NULL DEFAULT 0,
       target_grade REAL DEFAULT 100,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
@@ -310,6 +311,7 @@ async function initializeTables(db) {
     ['projects', 'status_options_json', `TEXT NOT NULL DEFAULT '{"todo":[],"in_progress":[],"done":[]}'`],
     ['folders', 'drop_lowest_count', 'INTEGER NOT NULL DEFAULT 0'],
     ['folders', 'drop_highest_count', 'INTEGER NOT NULL DEFAULT 0'],
+    ['folders', 'grade_enabled', 'INTEGER NOT NULL DEFAULT 0'],
     ['folders', 'sort_order', 'INTEGER DEFAULT NULL'],
     ['folders', 'bonus_cap_enabled', 'INTEGER NOT NULL DEFAULT 0'],
     ['tasks', 'extra_credit', 'INTEGER NOT NULL DEFAULT 0'],
@@ -882,6 +884,34 @@ app.post('/api/auth/logout', async (c) => {
   return c.json({ success: true });
 });
 
+app.post('/api/auth/change-password', async (c) => {
+  const user = await getAuthenticatedUser(c);
+  if (!user) return c.json({ error: 'Authentication required' }, 401);
+  if (typeof c.env.APP_PEPPER !== 'string' || c.env.APP_PEPPER.length < 32) {
+    return c.json({ error: 'Password service is not configured.' }, 503);
+  }
+  let body;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON payload' }, 400); }
+  const currentPassword = typeof body?.current_password === 'string' ? body.current_password : '';
+  const newPassword = typeof body?.new_password === 'string' ? body.new_password : '';
+  if (newPassword.length < 12 || newPassword.length > 1024) {
+    return c.json({ error: 'New password must be between 12 and 1024 characters.' }, 400);
+  }
+  const db = c.env.DB;
+  const account = await db.prepare('SELECT password_hash, salt FROM users WHERE id = ?').bind(user.id).first();
+  if (!account || !timingSafeEqual(await hashPassword(currentPassword, account.salt, c.env.APP_PEPPER), account.password_hash)) {
+    return c.json({ error: 'Current password is incorrect.' }, 403);
+  }
+  const salt = generateSalt();
+  const passwordHash = await hashPassword(newPassword, salt, c.env.APP_PEPPER);
+  const sessionToken = readSessionCookie(c);
+  await db.batch([
+    db.prepare('UPDATE users SET password_hash = ?, salt = ? WHERE id = ?').bind(passwordHash, salt, user.id),
+    db.prepare('DELETE FROM sessions WHERE user_id = ? AND id != ?').bind(user.id, sessionToken)
+  ]);
+  return c.json({ success: true });
+});
+
 app.post('/api/admin/users', async (c) => {
   const user = await getAuthenticatedUser(c);
   if (!user) return c.json({ error: 'Authentication required' }, 401);
@@ -1226,13 +1256,15 @@ app.post('/api/projects/:id/folders', async (c) => {
   const target_grade = Number(body.target_grade) || 100;
   const bonus_cap_enabled = body.bonus_cap_enabled === true || body.bonus_cap_enabled === 1
     || body.bonus_cap_enabled === '1' || body.bonus_cap_enabled === 'true' ? 1 : 0;
+  const grade_enabled = body.grade_enabled === true || body.grade_enabled === 1
+    || body.grade_enabled === '1' || body.grade_enabled === 'true' ? 1 : 0;
 
   await db.prepare(`
-    INSERT INTO folders (id, project_id, parent_id, name, description, color, weight_percent, drop_lowest_count, drop_highest_count, target_grade, bonus_cap_enabled)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).bind(id, projectId, parent_id, name, description, color, weight_percent, drop_lowest_count, drop_highest_count, target_grade, bonus_cap_enabled).run();
+    INSERT INTO folders (id, project_id, parent_id, name, description, color, weight_percent, drop_lowest_count, drop_highest_count, target_grade, bonus_cap_enabled, grade_enabled)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(id, projectId, parent_id, name, description, color, weight_percent, drop_lowest_count, drop_highest_count, target_grade, bonus_cap_enabled, grade_enabled).run();
 
-  return c.json({ id, project_id: projectId, parent_id, name, description, color, weight_percent, drop_lowest_count, drop_highest_count, target_grade, bonus_cap_enabled }, 201);
+  return c.json({ id, project_id: projectId, parent_id, name, description, color, weight_percent, drop_lowest_count, drop_highest_count, target_grade, bonus_cap_enabled, grade_enabled }, 201);
 });
 
 app.put('/api/folders/:id', async (c) => {
@@ -1241,7 +1273,7 @@ app.put('/api/folders/:id', async (c) => {
 
   const db = c.env.DB;
   const id = c.req.param('id');
-  const folder = await db.prepare('SELECT project_id, parent_id, bonus_cap_enabled FROM folders WHERE id = ?').bind(id).first();
+  const folder = await db.prepare('SELECT project_id, parent_id, bonus_cap_enabled, grade_enabled FROM folders WHERE id = ?').bind(id).first();
   if (!folder) return c.json({ error: 'Folder not found' }, 404);
 
   const access = await getProjectAccessLevel(db, folder.project_id, user);
@@ -1263,6 +1295,9 @@ app.put('/api/folders/:id', async (c) => {
     ? Number(folder.bonus_cap_enabled) || 0
     : body.bonus_cap_enabled === true || body.bonus_cap_enabled === 1
       || body.bonus_cap_enabled === '1' || body.bonus_cap_enabled === 'true' ? 1 : 0;
+  const grade_enabled = body.grade_enabled === undefined
+    ? Number(folder.grade_enabled) || 0
+    : body.grade_enabled === true || body.grade_enabled === 1 || body.grade_enabled === '1' || body.grade_enabled === 'true' ? 1 : 0;
 
   if (parent_id === id) {
     return c.json({ error: 'A folder cannot be its own parent' }, 400);
@@ -1284,10 +1319,10 @@ app.put('/api/folders/:id', async (c) => {
 
   await db.prepare(`
     UPDATE folders
-    SET name = ?, parent_id = ?, description = ?, color = ?, weight_percent = ?, drop_lowest_count = ?, drop_highest_count = ?, target_grade = ?, bonus_cap_enabled = ?,
+    SET name = ?, parent_id = ?, description = ?, color = ?, weight_percent = ?, drop_lowest_count = ?, drop_highest_count = ?, target_grade = ?, bonus_cap_enabled = ?, grade_enabled = ?,
         sort_order = CASE WHEN parent_id IS NOT ? THEN NULL ELSE sort_order END
     WHERE id = ?
-  `).bind(name, parent_id, description, color, weight_percent, drop_lowest_count, drop_highest_count, target_grade, bonus_cap_enabled, parent_id, id).run();
+  `).bind(name, parent_id, description, color, weight_percent, drop_lowest_count, drop_highest_count, target_grade, bonus_cap_enabled, grade_enabled, parent_id, id).run();
 
   return c.json({ success: true });
 });

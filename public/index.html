@@ -43,6 +43,35 @@
     </div>
   </div>
 
+  <div id="changePasswordModal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2>Change Password</h2>
+        <button class="modal-close" id="btnCloseChangePassword" type="button" aria-label="Close">&times;</button>
+      </div>
+      <form id="changePasswordForm">
+        <div class="form-group">
+          <label for="currentPassword">Current password</label>
+          <input id="currentPassword" type="password" autocomplete="current-password" required>
+        </div>
+        <div class="form-group">
+          <label for="newPassword">New password (at least 12 characters)</label>
+          <input id="newPassword" type="password" minlength="12" maxlength="1024" autocomplete="new-password" required>
+        </div>
+        <div class="form-group">
+          <label for="confirmNewPassword">Confirm new password</label>
+          <input id="confirmNewPassword" type="password" minlength="12" maxlength="1024" autocomplete="new-password" required>
+        </div>
+        <div id="changePasswordError" class="auth-error-msg hidden" role="alert"></div>
+        <div class="modal-footer">
+          <div class="footer-spacer"></div>
+          <button type="button" class="btn-secondary" id="btnCancelChangePassword">Cancel</button>
+          <button type="submit" class="btn-primary">Update password</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <!-- Main Application Container -->
   <div class="app-container">
     <!-- Sidebar -->
@@ -64,6 +93,12 @@
             <span class="user-subtext" id="userRoleSubtext"></span>
           </div>
         </div>
+        <button id="btnChangePassword" class="btn-user-switch" title="Change Password" aria-label="Change password">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-4 h-4">
+            <rect x="4" y="10" width="16" height="11" rx="2" />
+            <path d="M8 10V7a4 4 0 1 1 8 0v3" />
+          </svg>
+        </button>
         <button id="btnLogout" class="btn-user-switch" title="Log Out / Switch Account">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-4 h-4">
             <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
@@ -311,6 +346,9 @@
             <label for="ganttDayWidth">Day width</label>
             <input type="range" id="ganttDayWidth" min="16" max="160" step="4" value="40">
             <output id="ganttDayWidthValue">40 px</output>
+            <label for="ganttRowHeight">Task row height</label>
+            <input type="range" id="ganttRowHeight" min="24" max="80" step="2" value="42">
+            <output id="ganttRowHeightValue">42 px</output>
             <label for="ganttRangeStart">From</label>
             <input type="date" id="ganttRangeStart" aria-label="Gantt range start">
             <label for="ganttRangeEnd">To</label>
@@ -381,7 +419,7 @@
           <span class="form-hint">Add or edit options in the project settings.</span>
         </div>
 
-        <div class="form-row">
+        <div class="form-row task-grade-fields">
           <div class="form-group">
             <label for="taskEarnedPoints">Earned Points</label>
             <input type="number" id="taskEarnedPoints" step="0.1" placeholder="e.g. 95 (leave empty if not graded)">
@@ -393,7 +431,7 @@
         </div>
 
         <div class="form-row">
-          <div class="form-group">
+          <div class="form-group task-grade-fields">
             <label for="taskGrade">Grade Override % <span class="form-hint"
                 style="display:inline; font-size:0.72rem;">(optional — overrides points ratio for
                 calculations)</span></label>
@@ -594,6 +632,13 @@
             <label for="folderColor">Badge Color</label>
             <input type="color" id="folderColor" value="#25c2fd">
           </div>
+        </div>
+        <div class="form-group">
+          <label class="folder-bonus-cap-toggle" for="folderGradeEnabled">
+            <input type="checkbox" id="folderGradeEnabled">
+            Graded category (show grade fields on tasks)
+          </label>
+          <span class="form-hint">When enabled, assignment points and grade overrides contribute to this category's grade.</span>
         </div>
         <div class="form-group">
           <div class="form-row">

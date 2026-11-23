@@ -1758,6 +1758,24 @@ body {
   opacity: 0.82;
   white-space: nowrap;
   text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.gantt-folder-sidebar-cell::before {
+  content: '▾';
+  display: inline-block;
+  flex: 0 0 0.75rem;
+  margin-left: -0.75rem;
+  color: var(--accent-2);
+}
+
+.gantt-folder-sidebar-cell.collapsed::before {
+  content: '▸';
+}
+
+.gantt-folder-sidebar-cell:focus-visible {
+  outline: 2px solid var(--accent-2);
+  outline-offset: -2px;
 }
 
 .gantt-folder-span {
