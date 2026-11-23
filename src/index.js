@@ -115,6 +115,28 @@ function normalizeLocalDateTime(value) {
   return value;
 }
 
+function normalizeRepeatRule(body) {
+  const frequency = typeof body.repeat_frequency === 'string' ? body.repeat_frequency : '';
+  if (!frequency) return { valid: true, frequency: '', interval: 1, until: null };
+  if (!['daily', 'weekly', 'monthly', 'yearly'].includes(frequency)) {
+    return { valid: false, error: 'Choose a valid repeat frequency.' };
+  }
+  const interval = Number(body.repeat_interval);
+  if (!Number.isInteger(interval) || interval < 1 || interval > 999) {
+    return { valid: false, error: 'Repeat interval must be a whole number from 1 to 999.' };
+  }
+  const dateIsValid = value => {
+    if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+    const date = new Date(`${value}T00:00:00.000Z`);
+    return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
+  };
+  const anchor = body.start_date || body.due_date;
+  const until = body.repeat_until;
+  if (!dateIsValid(anchor)) return { valid: false, error: 'A valid start date or due date is required for repeating tasks.' };
+  if (!dateIsValid(until) || until < anchor) return { valid: false, error: 'Choose a valid repeat end date on or after the task start date.' };
+  return { valid: true, frequency, interval, until };
+}
+
 async function rateLimitKey(value, pepper) {
   const bytes = new TextEncoder().encode(`${pepper}:${value}`);
   const digest = await crypto.subtle.digest('SHA-256', bytes);
@@ -270,6 +292,9 @@ async function initializeTables(db) {
       weight_override REAL DEFAULT NULL,
       extra_credit INTEGER NOT NULL DEFAULT 0,
       never_drop INTEGER NOT NULL DEFAULT 0,
+      repeat_frequency TEXT NOT NULL DEFAULT '',
+      repeat_interval INTEGER NOT NULL DEFAULT 1,
+      repeat_until TEXT DEFAULT NULL,
       sort_order INTEGER DEFAULT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -318,6 +343,9 @@ async function initializeTables(db) {
     ['folders', 'bonus_cap_enabled', 'INTEGER NOT NULL DEFAULT 0'],
     ['tasks', 'extra_credit', 'INTEGER NOT NULL DEFAULT 0'],
     ['tasks', 'never_drop', 'INTEGER NOT NULL DEFAULT 0'],
+    ['tasks', 'repeat_frequency', "TEXT NOT NULL DEFAULT ''"],
+    ['tasks', 'repeat_interval', 'INTEGER NOT NULL DEFAULT 1'],
+    ['tasks', 'repeat_until', 'TEXT DEFAULT NULL'],
     ['tasks', 'start_time', 'TEXT'],
     ['tasks', 'due_time', 'TEXT'],
     ['tasks', 'open_at', 'TEXT'],
@@ -1021,8 +1049,11 @@ app.get('/api/projects', async (c) => {
     query = db.prepare(`
       SELECT p.*, 'edit' as user_access_level
       FROM projects p
+      LEFT JOIN project_members admin_pm
+        ON admin_pm.project_id = p.id AND admin_pm.user_id = ?
+      WHERE admin_pm.access_level IS NULL OR admin_pm.access_level != 'none'
       ORDER BY p.created_at ASC
-    `);
+    `).bind(user.id);
   } else {
     query = db.prepare(`
       SELECT p.*, pm.access_level as user_access_level
@@ -1033,6 +1064,32 @@ app.get('/api/projects', async (c) => {
     `).bind(user.id);
   }
 
+  const { results } = await query.all();
+  return c.json(results || []);
+});
+
+app.get('/api/admin/projects', async (c) => {
+  const user = await getAuthenticatedUser(c);
+  if (!user) return c.json({ error: 'Authentication required' }, 401);
+  if (user.systemRole !== 'admin') return c.json({ error: 'System administrator access required' }, 403);
+
+  const { results } = await c.env.DB.prepare('SELECT id, name FROM projects ORDER BY name COLLATE NOCASE ASC').all();
+  return c.json(results || []);
+});
+
+app.get('/api/permission-projects', async (c) => {
+  const user = await getAuthenticatedUser(c);
+  if (!user) return c.json({ error: 'Authentication required' }, 401);
+
+  const query = user.systemRole === 'admin'
+    ? c.env.DB.prepare('SELECT id, name FROM projects ORDER BY name COLLATE NOCASE ASC')
+    : c.env.DB.prepare(`
+      SELECT p.id, p.name
+      FROM projects p
+      JOIN project_members pm ON pm.project_id = p.id
+      WHERE pm.user_id = ? AND pm.access_level = 'edit'
+      ORDER BY p.name COLLATE NOCASE ASC
+    `).bind(user.id);
   const { results } = await query.all();
   return c.json(results || []);
 });
@@ -1141,7 +1198,9 @@ app.get('/api/projects/:id/members', async (c) => {
 
   const db = c.env.DB;
   const projectId = c.req.param('id');
-  if (user.systemRole !== 'admin') return c.json({ error: 'System administrator access required' }, 403);
+  const isAdmin = user.systemRole === 'admin';
+  const access = await getProjectAccessLevel(db, projectId, user);
+  if (!isAdmin && !verifyProjectPermission(access, 'edit')) return c.json({ error: 'Project edit access required' }, 403);
   const project = await db.prepare('SELECT id FROM projects WHERE id = ?').bind(projectId).first();
   if (!project) return c.json({ error: 'Project not found' }, 404);
 
@@ -1156,9 +1215,40 @@ app.get('/api/projects/:id/members', async (c) => {
     name: u.name,
     systemRole: u.system_role || 'user',
     accessLevel: memberMap.get(u.id) || 'none'
-  }));
+  })).filter(member => isAdmin || member.accessLevel !== 'none');
 
   return c.json(response);
+});
+
+app.post('/api/projects/:id/viewers', async (c) => {
+  const user = await getAuthenticatedUser(c);
+  if (!user) return c.json({ error: 'Authentication required' }, 401);
+
+  const db = c.env.DB;
+  const projectId = c.req.param('id');
+  const isAdmin = user.systemRole === 'admin';
+  const access = await getProjectAccessLevel(db, projectId, user);
+  if (!isAdmin && !verifyProjectPermission(access, 'edit')) return c.json({ error: 'Project edit access required' }, 403);
+  const project = await db.prepare('SELECT id FROM projects WHERE id = ?').bind(projectId).first();
+  if (!project) return c.json({ error: 'Project not found' }, 404);
+
+  const { username: rawUsername } = await c.req.json();
+  const username = sanitizeString(rawUsername, 80);
+  if (!username) return c.json({ error: 'Enter a username.' }, 400);
+  const target = await db.prepare('SELECT id, username, name, system_role FROM users WHERE username = ? COLLATE NOCASE').bind(username).first();
+  if (!target) return c.json({ error: 'No account exists with that username.' }, 404);
+  if (!isAdmin && target.system_role === 'admin') return c.json({ error: 'System administrators retain global edit access and cannot be managed as viewers.' }, 403);
+
+  const current = await db.prepare('SELECT access_level FROM project_members WHERE project_id = ? AND user_id = ?').bind(projectId, target.id).first();
+  if (current?.access_level === 'edit') return c.json({ error: 'That user is already an editor. Editors cannot change editor access.' }, 403);
+  if (current?.access_level === 'view') return c.json({ error: 'That user already has view access.' }, 409);
+
+  await db.prepare(`
+    INSERT OR REPLACE INTO project_members (project_id, user_id, access_level)
+    VALUES (?, ?, 'view')
+  `).bind(projectId, target.id).run();
+
+  return c.json({ success: true, user: { userId: target.id, username: target.username, name: target.name, systemRole: target.system_role || 'user', accessLevel: 'view' } });
 });
 
 app.put('/api/projects/:id/members/:userId', async (c) => {
@@ -1168,16 +1258,25 @@ app.put('/api/projects/:id/members/:userId', async (c) => {
   const db = c.env.DB;
   const projectId = c.req.param('id');
   const targetUserId = c.req.param('userId');
-  if (user.systemRole !== 'admin') return c.json({ error: 'System administrator access required' }, 403);
+  const isAdmin = user.systemRole === 'admin';
 
   const project = await db.prepare('SELECT id FROM projects WHERE id = ?').bind(projectId).first();
   if (!project) return c.json({ error: 'Project not found' }, 404);
-  const target = await db.prepare('SELECT id FROM users WHERE id = ?').bind(targetUserId).first();
+  const target = await db.prepare('SELECT id, system_role FROM users WHERE id = ?').bind(targetUserId).first();
   if (!target) return c.json({ error: 'User not found' }, 404);
 
   const { access_level } = await c.req.json();
   if (!['none', 'view', 'edit'].includes(access_level)) {
     return c.json({ error: 'Invalid access level. Must be none, view, or edit.' }, 400);
+  }
+
+  if (!isAdmin) {
+    const projectAccess = await getProjectAccessLevel(db, projectId, user);
+    if (!verifyProjectPermission(projectAccess, 'edit')) return c.json({ error: 'Project edit access required' }, 403);
+    const current = await db.prepare('SELECT access_level FROM project_members WHERE project_id = ? AND user_id = ?').bind(projectId, targetUserId).first();
+    if (target.system_role === 'admin' || current?.access_level !== 'view' || access_level !== 'none') {
+      return c.json({ error: 'Editors may only remove view access from existing viewers.' }, 403);
+    }
   }
 
   await db.prepare(`
@@ -1252,7 +1351,8 @@ app.post('/api/projects/:id/folders', async (c) => {
   const name = sanitizeString(body.name || 'New Folder', 100);
   const parent_id = body.parent_id ? String(body.parent_id) : null;
   const description = sanitizeString(body.description || '', 500);
-  const color = sanitizeString(body.color || '', 20);
+  const projectSettings = await db.prepare('SELECT color, graded FROM projects WHERE id = ?').bind(projectId).first();
+  const color = sanitizeColor(body.color, projectSettings?.color || '#38d8aa');
   const requestedWeight = Number(body.weight_percent);
   const weight_percent = Number.isFinite(requestedWeight) ? Math.max(0, requestedWeight) : 0;
   const requestedDropLowest = Number(body.drop_lowest_count);
@@ -1262,7 +1362,6 @@ app.post('/api/projects/:id/folders', async (c) => {
   const target_grade = Number(body.target_grade) || 100;
   const bonus_cap_enabled = body.bonus_cap_enabled === true || body.bonus_cap_enabled === 1
     || body.bonus_cap_enabled === '1' || body.bonus_cap_enabled === 'true' ? 1 : 0;
-  const projectSettings = await db.prepare('SELECT graded FROM projects WHERE id = ?').bind(projectId).first();
   const grade_enabled = body.grade_enabled === undefined
     ? Number(projectSettings?.graded) || 0
     : body.grade_enabled === true || body.grade_enabled === 1 || body.grade_enabled === '1' || body.grade_enabled === 'true' ? 1 : 0;
@@ -1281,7 +1380,7 @@ app.put('/api/folders/:id', async (c) => {
 
   const db = c.env.DB;
   const id = c.req.param('id');
-  const folder = await db.prepare('SELECT project_id, parent_id, bonus_cap_enabled, grade_enabled FROM folders WHERE id = ?').bind(id).first();
+  const folder = await db.prepare('SELECT project_id, parent_id, color, bonus_cap_enabled, grade_enabled FROM folders WHERE id = ?').bind(id).first();
   if (!folder) return c.json({ error: 'Folder not found' }, 404);
 
   const access = await getProjectAccessLevel(db, folder.project_id, user);
@@ -1291,7 +1390,8 @@ app.put('/api/folders/:id', async (c) => {
   const name = sanitizeString(body.name || 'Folder', 100);
   const parent_id = body.parent_id ? String(body.parent_id) : null;
   const description = sanitizeString(body.description || '', 500);
-  const color = sanitizeString(body.color || '', 20);
+  const projectColor = await db.prepare('SELECT color FROM projects WHERE id = ?').bind(folder.project_id).first();
+  const color = sanitizeColor(body.color, folder.color || projectColor?.color || '#38d8aa');
   const requestedWeight = Number(body.weight_percent);
   const weight_percent = Number.isFinite(requestedWeight) ? Math.max(0, requestedWeight) : 0;
   const requestedDropLowest = Number(body.drop_lowest_count);
@@ -1592,6 +1692,8 @@ app.post('/api/projects/:id/tasks', async (c) => {
   if (!verifyProjectPermission(access, 'edit')) return c.json({ error: 'Requires edit permission on project' }, 403);
 
   const body = await c.req.json();
+  const repeat = normalizeRepeatRule(body);
+  if (!repeat.valid) return c.json({ error: repeat.error }, 400);
   const id = 'task-' + generateSalt().substring(0, 8);
 
   const title = sanitizeString(body.title || 'Untitled Task', 200);
@@ -1604,8 +1706,8 @@ app.post('/api/projects/:id/tasks', async (c) => {
   const never_drop = body.never_drop === true || body.never_drop === 1 || body.never_drop === '1' || body.never_drop === 'true' ? 1 : 0;
 
   await db.prepare(`
-    INSERT INTO tasks (id, project_id, folder_id, title, description, status, status_label, priority, start_date, due_date, start_time, due_time, open_at, progress, color, earned_points, max_points, grade, weight_override, extra_credit, never_drop)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO tasks (id, project_id, folder_id, title, description, status, status_label, priority, start_date, due_date, start_time, due_time, open_at, progress, color, earned_points, max_points, grade, weight_override, extra_credit, never_drop, repeat_frequency, repeat_interval, repeat_until)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).bind(
     id,
     projectId,
@@ -1627,7 +1729,10 @@ app.post('/api/projects/:id/tasks', async (c) => {
     body.grade !== undefined && body.grade !== '' && body.grade !== null ? Number(body.grade) : null,
     body.weight_override !== undefined && body.weight_override !== '' && body.weight_override !== null ? Number(body.weight_override) : null,
     extra_credit,
-    never_drop
+    never_drop,
+    repeat.frequency,
+    repeat.interval,
+    repeat.until
   ).run();
 
   const relatedWrites = [];
@@ -1658,13 +1763,21 @@ app.put('/api/tasks/:id', async (c) => {
 
   const db = c.env.DB;
   const id = c.req.param('id');
-  const task = await db.prepare('SELECT project_id FROM tasks WHERE id = ?').bind(id).first();
+  const task = await db.prepare('SELECT project_id, start_date, due_date, repeat_frequency, repeat_interval, repeat_until FROM tasks WHERE id = ?').bind(id).first();
   if (!task) return c.json({ error: 'Task not found' }, 404);
 
   const access = await getProjectAccessLevel(db, task.project_id, user);
   if (!verifyProjectPermission(access, 'edit')) return c.json({ error: 'Requires edit permission on project' }, 403);
 
   const body = await c.req.json();
+  const repeat = normalizeRepeatRule({
+    ...task,
+    ...body,
+    repeat_frequency: body.repeat_frequency === undefined ? task.repeat_frequency : body.repeat_frequency,
+    repeat_interval: body.repeat_interval === undefined ? task.repeat_interval : body.repeat_interval,
+    repeat_until: body.repeat_until === undefined ? task.repeat_until : body.repeat_until
+  });
+  if (!repeat.valid) return c.json({ error: repeat.error }, 400);
   const title = sanitizeString(body.title || 'Untitled Task', 200);
   const description = sanitizeString(body.description || '', 2000);
   const folder_id = sanitizeString(body.folder_id || '', 50);
@@ -1677,7 +1790,8 @@ app.put('/api/tasks/:id', async (c) => {
   await db.prepare(`
     UPDATE tasks
     SET title = ?, description = ?, folder_id = ?, status = ?, status_label = ?, priority = ?, start_date = ?, due_date = ?, start_time = ?, due_time = ?, open_at = ?, progress = ?, color = ?,
-        earned_points = ?, max_points = ?, grade = ?, weight_override = ?, extra_credit = ?, never_drop = ?, updated_at = CURRENT_TIMESTAMP
+        earned_points = ?, max_points = ?, grade = ?, weight_override = ?, extra_credit = ?, never_drop = ?,
+        repeat_frequency = ?, repeat_interval = ?, repeat_until = ?, updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
   `).bind(
     title,
@@ -1699,6 +1813,9 @@ app.put('/api/tasks/:id', async (c) => {
     body.weight_override !== undefined && body.weight_override !== '' && body.weight_override !== null ? Number(body.weight_override) : null,
     extra_credit,
     never_drop,
+    repeat.frequency,
+    repeat.interval,
+    repeat.until,
     id
   ).run();
 

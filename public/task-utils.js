@@ -117,6 +117,112 @@ function localDateValue(date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
 
+function utcDateFromString(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value || ''))) return null;
+  const [year, month, day] = value.split('-').map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day ? date : null;
+}
+
+function utcDateString(date) {
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')}`;
+}
+
+function repeatDateAt(anchorValue, frequency, interval, occurrenceIndex) {
+  const date = utcDateFromString(anchorValue);
+  const amount = Math.max(1, Math.trunc(Number(interval) || 1));
+  if (!date) return '';
+  const index = Math.max(0, Math.trunc(Number(occurrenceIndex) || 0));
+  if (frequency === 'daily' || frequency === 'weekly') {
+    date.setUTCDate(date.getUTCDate() + index * amount * (frequency === 'weekly' ? 7 : 1));
+  } else if (frequency === 'monthly') {
+    const day = date.getUTCDate();
+    date.setUTCDate(1);
+    date.setUTCMonth(date.getUTCMonth() + index * amount);
+    const lastDay = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0)).getUTCDate();
+    date.setUTCDate(Math.min(day, lastDay));
+  } else if (frequency === 'yearly') {
+    const month = date.getUTCMonth();
+    const day = date.getUTCDate();
+    date.setUTCFullYear(date.getUTCFullYear() + index * amount);
+    if (date.getUTCMonth() !== month) {
+      date.setUTCDate(0);
+    } else if (date.getUTCDate() !== day) {
+      date.setUTCDate(0);
+    }
+  }
+  return utcDateString(date);
+}
+
+export function addRepeatInterval(value, frequency, interval = 1) {
+  return repeatDateAt(value, frequency, interval, 1);
+}
+
+function shiftDateByDays(value, days) {
+  const date = utcDateFromString(value);
+  if (!date) return value || null;
+  date.setUTCDate(date.getUTCDate() + days);
+  return utcDateString(date);
+}
+
+function repeatOccurrence(task, occurrenceDate) {
+  const anchorDate = task.start_date || task.due_date;
+  const anchor = utcDateFromString(anchorDate);
+  const occurrence = utcDateFromString(occurrenceDate);
+  if (!anchor || !occurrence) return { ...task, id: `${task.id}__occ__${occurrenceDate}`, _recurrenceParent: task };
+  const offsetDays = Math.round((occurrence.getTime() - anchor.getTime()) / 86400000);
+  return {
+    ...task,
+    id: `${task.id}__occ__${occurrenceDate}`,
+    start_date: task.start_date ? shiftDateByDays(task.start_date, offsetDays) : null,
+    due_date: task.due_date ? shiftDateByDays(task.due_date, offsetDays) : null,
+    open_at: task.open_at ? `${shiftDateByDays(task.open_at.slice(0, 10), offsetDays)}${task.open_at.slice(10)}` : null,
+    dependencies: [],
+    _recurrenceParent: task,
+    _recurrenceDate: occurrenceDate
+  };
+}
+
+export function getNextTaskOccurrence(task, fromDate = localDateValue(new Date())) {
+  if (!task?.repeat_frequency) return task;
+  const anchor = task.start_date || task.due_date;
+  if (!utcDateFromString(anchor)) return task;
+  let date = anchor;
+  let last = date;
+  // Every interval is calculated from the original date, preserving a monthly
+  // rule such as the 31st even when an intervening month has fewer days.
+  for (let count = 0; count < 20000 && date <= (task.repeat_until || '9999-12-31'); count += 1) {
+    last = date;
+    if (date >= fromDate) return { ...repeatOccurrence(task, date), id: task.id };
+    const next = repeatDateAt(anchor, task.repeat_frequency, task.repeat_interval, count + 1);
+    if (!next || next <= date) break;
+    date = next;
+  }
+  return { ...repeatOccurrence(task, last), id: task.id };
+}
+
+export function expandRecurringTasks(tasks, holidays = []) {
+  const holidaySet = holidays instanceof Set ? holidays : new Set(holidays);
+  const expanded = [];
+  for (const task of tasks) {
+    if (!task.repeat_frequency || !task.repeat_until) {
+      expanded.push(task);
+      continue;
+    }
+    const anchor = task.start_date || task.due_date;
+    if (!utcDateFromString(anchor)) continue;
+    let date = anchor;
+    for (let count = 0; count < 20000 && date <= task.repeat_until; count += 1) {
+      // The project holiday rule is based on the task's scheduled start date.
+      if (!holidaySet.has(date)) expanded.push(repeatOccurrence(task, date));
+      const next = repeatDateAt(anchor, task.repeat_frequency, task.repeat_interval, count + 1);
+      if (!next || next <= date) break;
+      date = next;
+    }
+  }
+  return expanded;
+}
+
 export function buildGanttWeekRanges(startDate, totalDays) {
   const groups = [];
   for (let index = 0; index < totalDays; index += 1) {

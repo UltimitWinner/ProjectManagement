@@ -1,4 +1,4 @@
-import { sortTasks, excludeDoneTasks, buildGanttDependencyEdges, ganttDependencyPath, taskCustomFieldEntries, formatCustomFieldValue, getFolderPath, buildGanttRows, buildGanttWeekRanges, taskGanttDateRange, ganttTimeOffset, ganttCalendarDaysBetween, folderTreeGradePotential, pointsGradeProjection, weightedGradeContribution, currentGradeWithUngradedFolderDefault, tasksInFolderTree, tasksInFolderSubtree } from './task-utils.js';
+import { sortTasks, excludeDoneTasks, buildGanttDependencyEdges, ganttDependencyPath, taskCustomFieldEntries, formatCustomFieldValue, getFolderPath, buildGanttRows, buildGanttWeekRanges, taskGanttDateRange, ganttTimeOffset, ganttCalendarDaysBetween, folderTreeGradePotential, pointsGradeProjection, weightedGradeContribution, currentGradeWithUngradedFolderDefault, tasksInFolderTree, tasksInFolderSubtree, getNextTaskOccurrence, expandRecurringTasks } from './task-utils.js';
 import { parseCsv, serializeCsv, detectCsvProfile, normalizeImportRow, normalizeHeader, getCsvProfile, parseTransferDateValue, parseTransferTimeValue } from './transfer-utils.js';
 import { parseLearningSuiteHtml, previewLearningSuiteMatches, normalizeTaskMatchTitle } from './learning-suite-utils.js';
 import { canvasCourseToBackup, canvasCourseLabel, parseCanvasAssignmentsHtml, detectCanvasAssignmentsHtml } from './canvas-utils.js';
@@ -124,6 +124,10 @@ function setupEventListeners() {
   // Project Members & Permissions Modal
   btnManageMembers.addEventListener('click', () => openMembersModal());
   document.getElementById('btnCloseMembersModal').addEventListener('click', () => membersModal.classList.add('hidden'));
+  document.getElementById('membersProjectSelect').addEventListener('change', event => {
+    openMembersModal(event.target.value || null);
+  });
+  document.getElementById('addViewerForm').addEventListener('submit', handleAddViewer);
   document.getElementById('newUserForm').addEventListener('submit', handleCreateUser);
 
   // Folder Modal
@@ -141,6 +145,7 @@ function setupEventListeners() {
   document.getElementById('btnDeleteTask').addEventListener('click', handleDeleteTask);
   document.getElementById('taskStatus').addEventListener('change', event => populateTaskStatusOptions(event.target.value));
   document.getElementById('taskFolder').addEventListener('change', updateTaskGradeFieldVisibility);
+  document.getElementById('taskRepeatEnabled').addEventListener('change', updateTaskRepeatVisibility);
 
   // Progress range label
   document.getElementById('taskProgress').addEventListener('input', (e) => {
@@ -1051,6 +1056,7 @@ async function loadProjects() {
   try {
     projects = await api('/api/projects');
     renderSidebarProjects();
+    updateProjectPermissionsButton();
 
     if (projects.length > 0) {
       if (!currentProjectId || !projects.find(p => p.id === currentProjectId)) {
@@ -1061,12 +1067,24 @@ async function loadProjects() {
     } else {
       currentProjectId = null;
       currentProject = null;
-      btnManageMembers.classList.toggle('hidden', currentUser?.systemRole !== 'admin');
+      currentProjectAccess = 'none';
+      updateProjectPermissionsButton();
       currentProjectTitle.textContent = 'No Projects Available';
-      currentProjectDesc.textContent = 'You are not assigned to any projects. Click + to create one.';
+      currentProjectDesc.textContent = 'There are no projects in your sidebar. Use Project Permissions to restore access or create a project.';
+      document.getElementById('restrictedMsg').textContent = 'No projects are currently available in your sidebar. System administrators can restore project access in Project Permissions.';
       tasks = [];
       folders = [];
-      renderCurrentView();
+      customFields = [];
+      document.querySelectorAll('.edit-required').forEach(element => {
+        if (element.id !== 'btnManageMembers') element.disabled = true;
+      });
+      document.getElementById('btnDataTransfer').disabled = true;
+      document.querySelector('.view-switcher').style.display = 'none';
+      folderView.classList.remove('active');
+      boardView.classList.remove('active');
+      listView.classList.remove('active');
+      ganttView.classList.remove('active');
+      restrictedView.classList.remove('hidden');
     }
   } catch (err) {
     console.error('Failed to load projects', err);
@@ -1111,8 +1129,16 @@ async function selectProject(id) {
   // Enforce Project-Dependent Permissions in UI
   const canEdit = currentProjectAccess === 'edit';
   const hasAccess = currentProjectAccess !== 'none';
+  document.getElementById('btnDataTransfer').disabled = !hasAccess;
+  updateProjectPermissionsButton();
 
   document.querySelectorAll('.edit-required').forEach(el => {
+    if (el.id === 'btnManageMembers') {
+      el.disabled = false;
+      el.style.opacity = '1';
+      el.style.pointerEvents = 'auto';
+      return;
+    }
     if (canEdit) {
       el.removeAttribute('disabled');
       el.style.opacity = '1';
@@ -1123,7 +1149,6 @@ async function selectProject(id) {
       el.style.pointerEvents = 'none';
     }
   });
-  btnManageMembers.classList.toggle('hidden', currentUser?.systemRole !== 'admin');
 
   if (!hasAccess) {
     restrictedView.classList.remove('hidden');
@@ -1150,6 +1175,12 @@ async function selectProject(id) {
   await loadFolders();
   await loadCustomFields();
   await loadTasks();
+}
+
+function updateProjectPermissionsButton() {
+  const canManage = currentUser?.systemRole === 'admin'
+    || projects.some(project => project.user_access_level === 'edit');
+  btnManageMembers.classList.toggle('hidden', !canManage);
 }
 
 async function loadFolders() {
@@ -1343,9 +1374,13 @@ function exportTasks() {
   const profile = getCsvProfile(format);
   const records = taskTransferRecords(sourceTasks);
   const headers = profile.map(([header]) => header);
+  headers.push('Repeat Frequency', 'Repeat Interval', 'Repeat Until');
   for (const field of customFields) headers.push(`Custom: ${field.name}`);
   const rows = records.map(task => Object.fromEntries([
     ...profile.map(([header, getValue]) => [header, getValue(task)]),
+    ['Repeat Frequency', task.repeat_frequency || ''],
+    ['Repeat Interval', task.repeat_frequency ? task.repeat_interval : ''],
+    ['Repeat Until', task.repeat_until || ''],
     ...customFields.map(field => [`Custom: ${field.name}`, task.custom_values?.[field.id] ?? ''])
   ]));
   downloadFile(transferFilename('csv'), '\uFEFF' + serializeCsv(headers, rows), 'text/csv;charset=utf-8');
@@ -1608,6 +1643,10 @@ function makeTaskImportPayload(row, profile, folderId, customValueIds) {
     weight_override: parseTransferNumber(row.weight_override),
     extra_credit: /^(?:1|true|yes|y)$/i.test(String(row.extra_credit || '').trim()),
     never_drop: /^(?:1|true|yes|y)$/i.test(String(row.never_drop || '').trim()),
+    repeat_frequency: ['daily', 'weekly', 'monthly', 'yearly'].includes(String(row.repeat_frequency || '').toLowerCase())
+      ? String(row.repeat_frequency).toLowerCase() : '',
+    repeat_interval: Math.max(1, Math.min(999, parseInt(row.repeat_interval, 10) || 1)),
+    repeat_until: parseTransferDate(row.repeat_until) || null,
     dependencies: [],
     custom_values,
     _sourceId: row.id || '',
@@ -1770,6 +1809,10 @@ async function importTasks() {
           due_time: row.due_time || null, open_at: row.open_at || null, progress: Number(row.progress) || 0,
           color: row.color || '', earned_points: row.earned_points ?? null, max_points: row.max_points ?? null,
           grade: row.grade ?? null, weight_override: row.weight_override ?? null,
+          repeat_frequency: ['daily', 'weekly', 'monthly', 'yearly'].includes(String(row.repeat_frequency || '').toLowerCase())
+            ? String(row.repeat_frequency).toLowerCase() : '',
+          repeat_interval: Math.max(1, Math.min(999, Number(row.repeat_interval) || 1)),
+          repeat_until: row.repeat_until || null,
           extra_credit: /^(?:1|true|yes|y)$/i.test(String(row.extra_credit || '').trim()),
           never_drop: /^(?:1|true|yes|y)$/i.test(String(row.never_drop || '').trim()),
           custom_values, dependencies: []
@@ -1817,6 +1860,9 @@ async function importTasks() {
           due_date: payload.due_date || null,
           due_time: payload.due_time || null,
           open_at: existing.open_at || null,
+          repeat_frequency: payload.repeat_frequency || existing.repeat_frequency || '',
+          repeat_interval: payload.repeat_frequency ? payload.repeat_interval : (existing.repeat_interval || 1),
+          repeat_until: payload.repeat_frequency ? payload.repeat_until : (existing.repeat_until || null),
           progress: hasGrade ? 100 : (Number(existing.progress) || 0),
           color: existing.color || '',
           custom_values: { ...(existing.custom_values || {}), ...(payload.custom_values || {}) },
@@ -2071,12 +2117,7 @@ function renderFolderNode(folder, depth, gradeData) {
   const isRoot = depth === 0;
   node.className = `folder-node ${isRoot ? 'root-folder' : 'sub-folder'}`;
   node.style.marginLeft = `${depth * 20}px`;
-  // Add a left border tint that gets lighter as depth increases
-  if (!isRoot) {
-    node.style.borderLeftWidth = '2px';
-    node.style.borderLeftStyle = 'solid';
-    node.style.borderLeftColor = depth % 2 ? '#25c2fd' : '#38d8aa';
-  }
+  node.style.setProperty('--folder-color', getFolderDisplayColor(folder));
 
   const folderIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>';
 
@@ -2318,6 +2359,7 @@ function createTaskTreeRow(task) {
 
   const gradeText = taskGradeScoreMarkup(task);
   const taskIsGraded = isFolderGraded(task.folder_id);
+  const displayTask = getNextTaskOccurrence(task);
 
   // Build custom field chips for fields that have a value on this task
   const cfChips = taskCustomFieldEntries(task, customFields)
@@ -2335,7 +2377,7 @@ function createTaskTreeRow(task) {
     </div>
     <div class="tree-task-meta">
       ${taskIsGraded ? `<span class="tree-task-grade">Score: <strong>${gradeText}</strong></span>` : ''}
-      <span class="tree-task-date">Due: ${escapeHtml(task.due_date ? formatTaskDateAndTime(task.due_date, task.due_time) : 'No due date')}</span>
+      <span class="tree-task-date">Due: ${escapeHtml(displayTask.due_date ? formatTaskDateAndTime(displayTask.due_date, displayTask.due_time) : 'No due date')}</span>
       <span class="tree-task-progress">${task.progress}%</span>
       <button class="btn-secondary edit-required" style="padding: 2px 8px; font-size: 0.75rem;" data-action="edit-task">Edit</button>
     </div>
@@ -2471,6 +2513,7 @@ function renderBoardView() {
     });
 
     filtered.forEach(task => {
+      const displayTask = getNextTaskOccurrence(task);
       const card = document.createElement('div');
       card.className = 'task-card';
       card.dataset.taskId = task.id;
@@ -2510,7 +2553,7 @@ function renderBoardView() {
           ${depBadge}
         </div>
         <div class="task-dates">
-          ${task.due_date ? `Due: ${escapeHtml(formatTaskDateAndTime(task.due_date, task.due_time))}` : 'No due date'}
+          ${displayTask.due_date ? `Due: ${escapeHtml(formatTaskDateAndTime(displayTask.due_date, displayTask.due_time))}` : 'No due date'}
         </div>
         <div class="progress-bar-bg">
           <div class="progress-bar-fill" style="width: ${task.progress}%"></div>
@@ -2532,7 +2575,7 @@ function renderBoardView() {
 
 // ----------------- 3. List View -----------------
 function sortedTasks() {
-  return sortTasks(excludeDoneTasks(tasks, excludeDoneFromList), folders, listSortState, projectStatusOptions());
+  return sortTasks(excludeDoneTasks(tasks, excludeDoneFromList).map(getNextTaskOccurrence), folders, listSortState, projectStatusOptions());
 }
 
 function setExcludeDoneFilter(enabled) {
@@ -2623,6 +2666,7 @@ function renderListView() {
 
   tbody.innerHTML = '';
   visibleTasks.forEach(task => {
+    const displayTask = getNextTaskOccurrence(task);
     const tr = document.createElement('tr');
     tr.dataset.taskId = task.id;
     tr.draggable = currentProjectAccess === 'edit';
@@ -2637,8 +2681,8 @@ function renderListView() {
       <td style="font-weight: 600;">${escapeHtml(task.title)}${taskIsGraded && task.extra_credit ? ' <span class="badge badge-custom">Extra Credit</span>' : ''}${taskIsGraded && task.never_drop ? ' <span class="badge badge-custom">Never drop</span>' : ''}</td>
       <td><span class="badge badge-course folder-path-badge">${escapeHtml(folderPath || '-')}</span></td>
       <td><span class="badge badge-${task.priority}">${task.priority}</span></td>
-      <td>${escapeHtml(formatTaskDateAndTime(task.start_date, task.start_time))}</td>
-      <td>${escapeHtml(formatTaskDateAndTime(task.due_date, task.due_time))}</td>
+      <td>${escapeHtml(formatTaskDateAndTime(displayTask.start_date, displayTask.start_time))}</td>
+      <td>${escapeHtml(formatTaskDateAndTime(displayTask.due_date, displayTask.due_time))}</td>
       ${hasGradedCategories() ? `<td><strong class="list-grade-value">${gradeText}</strong></td>` : ''}
       <td>${task.dependencies?.length ? `${task.dependencies.length} dependencies` : '-'}</td>
       <td>${task.progress}%</td>
@@ -2730,7 +2774,11 @@ function renderGanttView() {
   const preferences = getGanttPreferences();
   const yScale = preferences.rowHeight / 42;
   viewport.style.setProperty('--gantt-y-scale', String(yScale));
-  const ganttTasks = sortTasks(excludeDoneTasks(tasks, excludeDoneFromList), folders, listSortState, projectStatusOptions());
+  const projectHolidays = new Set(parseJsonArray(currentProject?.holidays_json, []));
+  const ganttTasks = expandRecurringTasks(
+    sortTasks(excludeDoneTasks(tasks, excludeDoneFromList), folders, listSortState, projectStatusOptions()),
+    projectHolidays
+  );
   const storedGanttRows = buildGanttRows(ganttTasks, folders);
   const collapsedFolders = new Set(preferences.collapsedFolders);
   const ganttRows = [];
@@ -2800,7 +2848,7 @@ function renderGanttView() {
   svgLines.style.height = `${chartHeight}px`;
 
   const nonWorkingDays = parseJsonArray(currentProject?.non_working_days_json, [0, 6]).map(Number);
-  const holidays = new Set(parseJsonArray(currentProject?.holidays_json, []));
+  const holidays = projectHolidays;
   for (let i = 0; i < totalDays; i++) {
     const curDate = new Date(minDate);
     curDate.setDate(curDate.getDate() + i);
@@ -2902,7 +2950,7 @@ function renderGanttView() {
     const sideCell = document.createElement('div');
     sideCell.className = 'gantt-sidebar-cell';
     sideCell.dataset.taskId = task.id;
-    sideCell.draggable = currentProjectAccess === 'edit';
+    sideCell.draggable = currentProjectAccess === 'edit' && !task._recurrenceParent;
     sideCell.style.paddingLeft = `${Math.max(1, (12 + entry.depth * 12) * yScale)}px`;
     sideCell.style.paddingRight = `${Math.max(1, 16 * yScale)}px`;
     sideCell.style.height = `${rowHeight(entry)}px`;
@@ -2931,7 +2979,7 @@ function renderGanttView() {
     const bar = document.createElement('div');
     bar.className = 'gantt-bar-item';
     bar.dataset.taskId = task.id;
-    bar.draggable = currentProjectAccess === 'edit';
+    bar.draggable = currentProjectAccess === 'edit' && !task._recurrenceParent;
     applyTaskFolderColor(bar, task);
     bar.style.color = readableTextColor(getTaskFolderColor(task) || getComputedStyle(document.documentElement).getPropertyValue('--accent-1').trim());
     bar.style.left = `${left}px`;
@@ -3010,14 +3058,8 @@ function renderGanttView() {
 }
 
 function getFolderDisplayColor(folder) {
-  const visited = new Set();
-  let current = folder;
-  while (current && !visited.has(current.id)) {
-    visited.add(current.id);
-    if (typeof current.color === 'string' && /^#(?:[\da-f]{3}|[\da-f]{6})$/i.test(current.color)) return current.color;
-    current = folders.find(item => item.id === current.parent_id);
-  }
-  return '#8fa6a6';
+  if (typeof folder?.color === 'string' && /^#(?:[\da-f]{3}|[\da-f]{6})$/i.test(folder.color)) return folder.color;
+  return currentProject?.color || '#38d8aa';
 }
 
 // ----------------- Task Modal Handlers -----------------
@@ -3064,6 +3106,7 @@ function updateTaskGradeFieldVisibility() {
 }
 
 function openTaskModal(task = null, presetFolderId = '') {
+  task = task?._recurrenceParent || task;
   document.getElementById('taskModalTitle').textContent = task ? 'Edit Task' : 'Create Task';
   document.getElementById('taskId').value = task ? task.id : '';
   document.getElementById('taskTitle').value = task ? task.title : '';
@@ -3084,6 +3127,11 @@ function openTaskModal(task = null, presetFolderId = '') {
   document.getElementById('taskGrade').value = (task?.grade !== null && task?.grade !== undefined) ? task.grade : '';
   document.getElementById('taskExtraCredit').checked = Boolean(task?.extra_credit);
   document.getElementById('taskNeverDrop').checked = Boolean(task?.never_drop);
+  document.getElementById('taskRepeatEnabled').checked = Boolean(task?.repeat_frequency);
+  document.getElementById('taskRepeatFrequency').value = task?.repeat_frequency || 'weekly';
+  document.getElementById('taskRepeatInterval').value = task?.repeat_interval || 1;
+  document.getElementById('taskRepeatUntil').value = task?.repeat_until || '';
+  updateTaskRepeatVisibility();
 
   renderTaskCustomFields(task);
 
@@ -3127,6 +3175,10 @@ function openTaskModal(task = null, presetFolderId = '') {
   });
 
   taskModal.classList.remove('hidden');
+}
+
+function updateTaskRepeatVisibility() {
+  document.getElementById('taskRepeatFields').classList.toggle('hidden', !document.getElementById('taskRepeatEnabled').checked);
 }
 
 function renderTaskCustomFields(task) {
@@ -3208,6 +3260,22 @@ async function handleSaveTask(e) {
   const grade = gradeRaw !== '' ? parseFloat(gradeRaw) : null;
   const extra_credit = document.getElementById('taskExtraCredit').checked;
   const never_drop = document.getElementById('taskNeverDrop').checked;
+  const repeats = document.getElementById('taskRepeatEnabled').checked;
+  const repeat_frequency = repeats ? document.getElementById('taskRepeatFrequency').value : '';
+  const repeat_interval = repeats ? Number(document.getElementById('taskRepeatInterval').value) : 1;
+  const repeat_until = repeats ? document.getElementById('taskRepeatUntil').value : '';
+  if (repeats && (!start_date && !due_date)) {
+    alert('Add a start date or due date to anchor the repeating task.');
+    return;
+  }
+  if (repeats && (!repeat_until || repeat_until < (start_date || due_date))) {
+    alert('Choose a repeat end date on or after the task start date.');
+    return;
+  }
+  if (repeats && (!Number.isInteger(repeat_interval) || repeat_interval < 1 || repeat_interval > 999)) {
+    alert('Repeat interval must be a whole number from 1 to 999.');
+    return;
+  }
 
   const depSelect = document.getElementById('taskDependencies');
   const dependencies = Array.from(depSelect.selectedOptions).map(o => o.value);
@@ -3240,6 +3308,9 @@ async function handleSaveTask(e) {
     ...(gradeWeightField ? { weight_override } : {}),
     extra_credit,
     never_drop,
+    repeat_frequency,
+    repeat_interval,
+    repeat_until: repeat_until || null,
     dependencies,
     custom_values
   };
@@ -3316,7 +3387,7 @@ function openFolderModal(folderToEdit = null, presetParentId = '') {
     document.getElementById('folderDropHighest').value = Number(folderToEdit.drop_highest_count) || 0;
     document.getElementById('folderBonusCap').checked = Boolean(folderToEdit.bonus_cap_enabled);
     document.getElementById('folderGradeEnabled').checked = Boolean(folderToEdit.grade_enabled);
-    document.getElementById('folderColor').value = folderToEdit.color || '#25c2fd';
+    document.getElementById('folderColor').value = folderToEdit.color || currentProject?.color || '#38d8aa';
     populateParentFolderDropdown(folderToEdit.parent_id, folderToEdit.id);
     document.getElementById('btnDeleteFolder').classList.remove('hidden');
   } else {
@@ -3329,7 +3400,7 @@ function openFolderModal(folderToEdit = null, presetParentId = '') {
     document.getElementById('folderDropHighest').value = '0';
     document.getElementById('folderBonusCap').checked = false;
     document.getElementById('folderGradeEnabled').checked = Boolean(currentProject?.graded);
-    document.getElementById('folderColor').value = '#25c2fd';
+    document.getElementById('folderColor').value = currentProject?.color || '#38d8aa';
     populateParentFolderDropdown(presetParentId);
     document.getElementById('btnDeleteFolder').classList.add('hidden');
   }
@@ -3388,69 +3459,105 @@ async function handleDeleteFolder() {
 }
 
 // ----------------- Project Members & Permissions Modal -----------------
-async function openMembersModal() {
-  if (currentUser?.systemRole !== 'admin') {
+async function openMembersModal(projectIdOverride = currentProjectId) {
+  const isAdmin = currentUser?.systemRole === 'admin';
+  const projectSelect = document.getElementById('membersProjectSelect');
+  let allProjects;
+  try {
+    allProjects = await api('/api/permission-projects');
+  } catch (err) {
+    alert('Failed to load projects for access management: ' + err.message);
+    return;
+  }
+  if (!isAdmin && !allProjects.length) {
     membersModal.classList.add('hidden');
     return;
   }
-  const hasProject = Boolean(currentProject && currentProjectId);
-  document.getElementById('membersModalHeading').textContent = hasProject ? 'Users & Project Permissions' : 'User Accounts';
+  projectSelect.innerHTML = (isAdmin ? '<option value="">-- Select a project --</option>' : '') + allProjects
+    .map(project => `<option value="${escapeHtml(project.id)}">${escapeHtml(project.name)}</option>`).join('');
+  const selectedProjectId = allProjects.some(project => project.id === projectIdOverride)
+    ? projectIdOverride : isAdmin ? '' : allProjects[0].id;
+  projectSelect.value = selectedProjectId;
+  const selectedProject = allProjects.find(project => project.id === selectedProjectId);
+  const hasProject = Boolean(selectedProject);
+  document.getElementById('membersModalHeading').textContent = hasProject
+    ? (isAdmin ? 'Project Access Permissions' : 'Project Viewers') : 'User Accounts';
   document.getElementById('membersModalHelp').innerHTML = hasProject
-    ? 'Manage accounts and project access. System administrators retain global access until their system role changes. Current project: <strong id="membersProjectTitle"></strong>.'
-    : 'Add or remove user accounts and manage system administrator roles.';
-  if (hasProject) document.getElementById('membersProjectTitle').textContent = currentProject.name;
+    ? isAdmin
+      ? 'Set each account’s access level. System administrators retain global edit access. Project: <strong id="membersProjectTitle"></strong>.'
+      : 'Add viewers by username or remove existing viewer access. Accounts with no project access are not shown. Project: <strong id="membersProjectTitle"></strong>.'
+    : 'Choose a project to manage its access, or add and manage user accounts.';
+  if (hasProject) document.getElementById('membersProjectTitle').textContent = selectedProject.name;
   document.querySelectorAll('.project-access-column').forEach(cell => cell.classList.toggle('hidden', !hasProject));
+  document.querySelectorAll('.system-role-column, .account-column').forEach(cell => cell.classList.toggle('hidden', !isAdmin));
+  document.getElementById('newUserForm').classList.toggle('hidden', !isAdmin);
+  document.getElementById('addViewerForm').classList.toggle('hidden', isAdmin || !hasProject);
   membersModal.classList.remove('hidden');
 
   try {
-    const members = await api(hasProject ? `/api/projects/${currentProjectId}/members` : '/api/admin/users');
+    const members = await api(hasProject ? `/api/projects/${selectedProjectId}/members` : '/api/admin/users');
     const tbody = document.getElementById('projectMembersTableBody');
     tbody.innerHTML = '';
     document.getElementById('newUserForm').reset();
+    document.getElementById('addViewerUsername').value = '';
 
     members.forEach(m => {
       const tr = document.createElement('tr');
       const isSelf = currentUser && currentUser.id === m.userId;
-
-      tr.innerHTML = `
-        <td><strong>${escapeHtml(m.username)}</strong> ${isSelf ? '<span class="badge badge-custom">You</span>' : ''}</td>
-        <td>${escapeHtml(m.name || '-')}</td>
-        <td>
+      const systemRoleCell = isAdmin ? `
+        <td class="system-role-column">
           <select class="system-role-select" data-user-id="${escapeHtml(m.userId)}">
             <option value="user" ${m.systemRole !== 'admin' ? 'selected' : ''}>User</option>
             <option value="admin" ${m.systemRole === 'admin' ? 'selected' : ''}>System administrator</option>
           </select>
         </td>
-        <td class="project-access-column ${hasProject ? '' : 'hidden'}">
+      ` : '<td class="system-role-column hidden"></td>';
+      const accessCell = hasProject ? `
+        <td class="project-access-column">
           <span class="badge ${m.accessLevel === 'edit' ? 'badge-success' : m.accessLevel === 'view' ? 'badge-medium' : 'badge-urgent'}">
             ${(m.accessLevel || 'N/A').toUpperCase()}
           </span>
         </td>
-        <td class="project-access-column ${hasProject ? '' : 'hidden'}">
-          <select class="member-role-select" data-user-id="${escapeHtml(m.userId)}" ${hasProject ? '' : 'disabled'}>
-            <option value="edit" ${m.accessLevel === 'edit' ? 'selected' : ''}>Edit (Full)</option>
-            <option value="view" ${m.accessLevel === 'view' ? 'selected' : ''}>View (Read-only)</option>
-            <option value="none" ${m.accessLevel === 'none' ? 'selected' : ''}>None (No access)</option>
-          </select>
+        <td class="project-access-column">
+          ${isAdmin ? `
+            <select class="member-role-select" data-user-id="${escapeHtml(m.userId)}">
+              <option value="edit" ${m.accessLevel === 'edit' ? 'selected' : ''}>Edit (Full)</option>
+              <option value="view" ${m.accessLevel === 'view' ? 'selected' : ''}>View (Read-only)</option>
+              <option value="none" ${m.accessLevel === 'none' ? 'selected' : ''}>None (No access)</option>
+            </select>
+          ` : m.accessLevel === 'view' && m.systemRole !== 'admin' ? `
+            <button class="btn-danger remove-viewer-button" type="button" data-user-id="${escapeHtml(m.userId)}">Remove viewer</button>
+          ` : m.systemRole === 'admin' ? '<span class="form-hint">System administrator</span>' : '<span class="form-hint">Editor access</span>'}
         </td>
-        <td><button class="btn-danger remove-user-button" type="button" data-user-id="${escapeHtml(m.userId)}" ${isSelf ? 'disabled title="You cannot remove your own account."' : ''}>Remove</button></td>
+      ` : '<td class="project-access-column hidden"></td><td class="project-access-column hidden"></td>';
+      const accountCell = isAdmin
+        ? `<td class="account-column"><button class="btn-danger remove-user-button" type="button" data-user-id="${escapeHtml(m.userId)}" ${isSelf ? 'disabled title="You cannot remove your own account."' : ''}>Remove</button></td>`
+        : '<td class="account-column hidden"></td>';
+      tr.innerHTML = `
+        <td><strong>${escapeHtml(m.username)}</strong> ${isSelf ? '<span class="badge badge-custom">You</span>' : ''}</td>
+        <td>${escapeHtml(m.name || '-')}</td>
+        ${systemRoleCell}
+        ${accessCell}
+        ${accountCell}
       `;
 
       const memberRoleSelect = tr.querySelector('.member-role-select');
-      if (memberRoleSelect) memberRoleSelect.addEventListener('change', async (e) => {
+      if (memberRoleSelect && isAdmin) memberRoleSelect.addEventListener('change', async (e) => {
         const newAccess = e.target.value;
         try {
-          await api(`/api/projects/${currentProjectId}/members/${encodeURIComponent(m.userId)}`, {
+          await api(`/api/projects/${selectedProjectId}/members/${encodeURIComponent(m.userId)}`, {
             method: 'PUT',
             body: JSON.stringify({ access_level: newAccess })
           });
-          await openMembersModal();
+          if (m.userId === currentUser.id) await loadProjects();
+          await openMembersModal(selectedProjectId);
         } catch (err) {
           alert('Failed to update project member access: ' + err.message);
         }
       });
 
-      tr.querySelector('.system-role-select').addEventListener('change', async (e) => {
+      const systemRoleSelect = tr.querySelector('.system-role-select');
+      if (systemRoleSelect) systemRoleSelect.addEventListener('change', async (e) => {
         const systemRole = e.target.value;
         if (isSelf && systemRole === 'user' && !confirm('Remove system administrator privileges from your account? You may lose access to projects where you are not an editor.')) {
           e.target.value = 'admin';
@@ -3467,22 +3574,36 @@ async function openMembersModal() {
             userDisplayName.textContent = currentUser.name;
             userRoleSubtext.textContent = currentUser.systemRole === 'admin' ? '(System Admin)' : '';
             await loadProjects();
-            if (currentUser.systemRole === 'admin') await openMembersModal();
+            if (currentUser.systemRole === 'admin') await openMembersModal(selectedProjectId);
             else membersModal.classList.add('hidden');
           } else {
-            openMembersModal();
+            openMembersModal(selectedProjectId);
           }
         } catch (err) {
           alert('Failed to update system role: ' + err.message);
-          openMembersModal();
+          openMembersModal(selectedProjectId);
         }
       });
 
-      tr.querySelector('.remove-user-button').addEventListener('click', async () => {
+      const removeViewerButton = tr.querySelector('.remove-viewer-button');
+      if (removeViewerButton) removeViewerButton.addEventListener('click', async () => {
+        if (!confirm(`Remove viewer access for "${m.username}"?`)) return;
+        try {
+          await api(`/api/projects/${selectedProjectId}/members/${encodeURIComponent(m.userId)}`, {
+            method: 'PUT', body: JSON.stringify({ access_level: 'none' })
+          });
+          await openMembersModal(selectedProjectId);
+        } catch (err) {
+          alert('Failed to remove viewer access: ' + err.message);
+        }
+      });
+
+      const removeUserButton = tr.querySelector('.remove-user-button');
+      if (removeUserButton) removeUserButton.addEventListener('click', async () => {
         if (isSelf || !confirm(`Remove the account "${m.username}"? Their active sessions and project access will be revoked.`)) return;
         try {
           await api(`/api/admin/users/${encodeURIComponent(m.userId)}`, { method: 'DELETE' });
-          await openMembersModal();
+          await openMembersModal(selectedProjectId);
         } catch (err) {
           alert('Failed to remove user: ' + err.message);
         }
@@ -3507,9 +3628,22 @@ async function handleCreateUser(event) {
       body: JSON.stringify({ username, name, password, system_role })
     });
     document.getElementById('newUserPassword').value = '';
-    await openMembersModal();
+    await openMembersModal(document.getElementById('membersProjectSelect').value || null);
   } catch (err) {
     alert('Failed to add user: ' + err.message);
+  }
+}
+
+async function handleAddViewer(event) {
+  event.preventDefault();
+  const projectId = document.getElementById('membersProjectSelect').value;
+  const username = document.getElementById('addViewerUsername').value.trim();
+  if (!projectId || !username) return;
+  try {
+    await api(`/api/projects/${projectId}/viewers`, { method: 'POST', body: JSON.stringify({ username }) });
+    await openMembersModal(projectId);
+  } catch (err) {
+    alert('Failed to add viewer: ' + err.message);
   }
 }
 

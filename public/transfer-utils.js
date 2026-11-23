@@ -54,6 +54,9 @@ const ALIASES = {
   weight_override: ['weightoverride', 'gradeweight'],
   extra_credit: ['extracredit', 'myplanextracredit', 'bonuswork'],
   never_drop: ['neverdrop', 'myplanneverdrop', 'protectfromdroprules'],
+  repeat_frequency: ['repeatfrequency', 'myplanrepeatfrequency'],
+  repeat_interval: ['repeatinterval', 'myplanrepeatinterval'],
+  repeat_until: ['repeatuntil', 'repeatenddate', 'myplanrepeatuntil'],
   dependencies: ['dependencies', 'dependson', 'predecessors', 'myplandependencies']
 };
 

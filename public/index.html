@@ -506,6 +506,32 @@
           </div>
         </div>
 
+        <div class="form-group form-checkbox-group">
+          <label for="taskRepeatEnabled">
+            <input type="checkbox" id="taskRepeatEnabled">
+            Repeat task
+          </label>
+        </div>
+        <div id="taskRepeatFields" class="form-row hidden">
+          <div class="form-group">
+            <label for="taskRepeatInterval">Repeat every</label>
+            <div class="form-row">
+              <input type="number" id="taskRepeatInterval" min="1" max="999" step="1" value="1" aria-label="Repeat interval">
+              <select id="taskRepeatFrequency" aria-label="Repeat frequency">
+                <option value="daily">Day(s)</option>
+                <option value="weekly">Week(s)</option>
+                <option value="monthly">Month(s)</option>
+                <option value="yearly">Year(s)</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-group">
+            <label for="taskRepeatUntil">Repeat until</label>
+            <input type="date" id="taskRepeatUntil">
+            <span class="form-hint">End date is inclusive. Occurrences starting on a project holiday are omitted from the Gantt chart.</span>
+          </div>
+        </div>
+
         <div class="form-group">
           <label for="taskDependencies">Depends On (Predecessor Tasks)</label>
           <select id="taskDependencies" multiple class="multi-select"
@@ -786,6 +812,10 @@
         <button class="modal-close" id="btnCloseMembersModal">&times;</button>
       </div>
       <div class="modal-body">
+        <div id="membersProjectPicker" class="form-group">
+          <label for="membersProjectSelect">Project permissions</label>
+          <select id="membersProjectSelect" aria-label="Choose a project to manage permissions"></select>
+        </div>
         <p id="membersModalHelp" class="form-hint" style="margin-bottom: 1rem;">
           Manage accounts and configure project access. System administrators have global access until their system role
           changes.
@@ -819,16 +849,28 @@
           </div>
           <button type="submit" class="btn-primary">Add user</button>
         </form>
+        <form id="addViewerForm" class="member-create-form hidden">
+          <h3>Add viewer</h3>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="addViewerUsername">Username</label>
+              <input id="addViewerUsername" type="text" maxlength="80" autocomplete="off" required>
+            </div>
+            <div class="form-group" style="justify-content:flex-end;">
+              <button type="submit" class="btn-primary">Grant view access</button>
+            </div>
+          </div>
+        </form>
         <div class="table-responsive">
           <table class="user-table">
             <thead>
               <tr>
                 <th>Username</th>
                 <th>Full Name</th>
-                <th>System Role</th>
+                <th class="system-role-column">System Role</th>
                 <th class="project-access-column">Project Access Level</th>
                 <th class="project-access-column">Change Access</th>
-                <th>Account</th>
+                <th class="account-column">Account</th>
               </tr>
             </thead>
             <tbody id="projectMembersTableBody"></tbody>
