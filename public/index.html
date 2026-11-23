@@ -167,7 +167,7 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-4 h-4">
               <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
             </svg>
-            Folders & Grades
+            <span id="folderViewTabLabel">Folders & Grades</span>
           </button>
           <button class="view-btn" data-view="board">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-4 h-4">
@@ -228,22 +228,22 @@
       <section id="folderView" class="view-section active">
         <!-- Grade Summary Metric Cards -->
         <div class="grade-cards-grid">
-          <div class="grade-scope-control">
+          <div class="grade-scope-control grade-info-card">
             <label for="gradeScopeSelect">Stats for</label>
             <select id="gradeScopeSelect"
               aria-label="Choose the top-level folder for grade and completion stats"></select>
           </div>
-          <div class="grade-card current">
+          <div class="grade-card current grade-info-card">
             <div class="grade-card-label">Current Grade</div>
             <div class="grade-card-val" id="valCurrentGrade">--</div>
             <div class="grade-card-sub" id="subCurrentGrade">Weighted course points earned so far</div>
           </div>
-          <div class="grade-card max">
+          <div class="grade-card max grade-info-card">
             <div class="grade-card-label">Maximum Possible Grade</div>
             <div class="grade-card-val" id="valMaxGrade">--</div>
             <div class="grade-card-sub">Assumes 100% on remaining assignments</div>
           </div>
-          <div class="grade-card min">
+          <div class="grade-card min grade-info-card">
             <div class="grade-card-label">Minimum Possible Grade</div>
             <div class="grade-card-val" id="valMinGrade">--</div>
             <div class="grade-card-sub">Floor grade if 0% on remaining work</div>
@@ -437,7 +437,7 @@
                 calculations)</span></label>
             <input type="number" id="taskGrade" step="0.01" min="0" placeholder="e.g. 105 (leave blank to use points)">
           </div>
-          <div class="form-group form-checkbox-group">
+          <div class="form-group form-checkbox-group task-grade-fields">
             <label for="taskExtraCredit">
               <input type="checkbox" id="taskExtraCredit">
               Extra credit (up to 2x; unearned work does not lower the grade)
@@ -617,6 +617,14 @@
           <label for="folderName">Folder Name *</label>
           <input type="text" id="folderName" required placeholder="e.g. CS 301 (Algorithms), Homework, Midterms...">
         </div>
+        <div id="folderGradedSetting" class="form-group folder-graded-setting">
+          <label class="folder-bonus-cap-toggle" for="folderGradeEnabled">
+            <input type="checkbox" id="folderGradeEnabled">
+            <strong>Grade this folder</strong>
+          </label>
+          <span class="form-hint">Turn this on to show grade, points, and extra-credit fields on tasks in this folder and its subfolders.</span>
+        </div>
+        <p id="folderGradedHelp" class="form-hint">Enable <strong>Graded</strong> in Project Settings to mark this folder as a graded category.</p>
         <div class="form-group">
           <label for="folderParent">Parent Folder (Select for Nested Subfolder)</label>
           <select id="folderParent">
@@ -624,7 +632,7 @@
           </select>
         </div>
         <div class="form-row">
-          <div class="form-group">
+          <div class="form-group project-grade-controls">
             <label for="folderWeight">Grade Weight / Rate (%)</label>
             <input type="number" id="folderWeight" step="any" min="0" placeholder="e.g. 30 or 2.5">
           </div>
@@ -633,14 +641,7 @@
             <input type="color" id="folderColor" value="#25c2fd">
           </div>
         </div>
-        <div class="form-group">
-          <label class="folder-bonus-cap-toggle" for="folderGradeEnabled">
-            <input type="checkbox" id="folderGradeEnabled">
-            Graded category (show grade fields on tasks)
-          </label>
-          <span class="form-hint">When enabled, assignment points and grade overrides contribute to this category's grade.</span>
-        </div>
-        <div class="form-group">
+        <div class="form-group project-grade-controls">
           <div class="form-row">
             <div class="form-group">
               <label for="folderDropLowest">Drop Lowest Tasks</label>
@@ -655,7 +656,7 @@
             Never-drop tasks are protected. Current scores drop graded work; maximum and minimum predictions apply the
             rules to perfect and zero scores for ungraded work respectively.</span>
         </div>
-        <div class="form-group">
+        <div class="form-group project-grade-controls">
           <label class="folder-bonus-cap-toggle" for="folderBonusCap">
             <input type="checkbox" id="folderBonusCap">
             Treat this folder's weight as a bonus cap
@@ -694,11 +695,18 @@
           <label for="projDesc">Description</label>
           <textarea id="projDesc" rows="2" placeholder="Course goals or team workflow..."></textarea>
         </div>
+        <div class="form-group folder-graded-setting">
+          <label class="folder-bonus-cap-toggle" for="projGraded">
+            <input type="checkbox" id="projGraded">
+            <strong>Graded</strong>
+          </label>
+          <span class="form-hint">Enable grade summaries and grade fields for selected folder categories in this project.</span>
+        </div>
         <div class="form-row">
           <div class="form-group">
             <label for="projDefaultView">Default Landing View</label>
             <select id="projDefaultView">
-              <option value="folder">Folders & Grades View</option>
+              <option value="folder">Folders View</option>
               <option value="board">Kanban Board</option>
               <option value="list">List View</option>
               <option value="gantt">Gantt Chart</option>

@@ -168,6 +168,7 @@ async function initializeTables(db) {
       non_working_days_json TEXT NOT NULL DEFAULT '[0,6]',
       holidays_json TEXT NOT NULL DEFAULT '[]',
       status_options_json TEXT NOT NULL DEFAULT '{"todo":[],"in_progress":[],"done":[]}',
+      graded INTEGER NOT NULL DEFAULT 0,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`),
     db.prepare(`CREATE TABLE IF NOT EXISTS users (
@@ -309,6 +310,7 @@ async function initializeTables(db) {
     ['projects', 'non_working_days_json', "TEXT NOT NULL DEFAULT '[0,6]'"],
     ['projects', 'holidays_json', "TEXT NOT NULL DEFAULT '[]'"],
     ['projects', 'status_options_json', `TEXT NOT NULL DEFAULT '{"todo":[],"in_progress":[],"done":[]}'`],
+    ['projects', 'graded', 'INTEGER NOT NULL DEFAULT 0'],
     ['folders', 'drop_lowest_count', 'INTEGER NOT NULL DEFAULT 0'],
     ['folders', 'drop_highest_count', 'INTEGER NOT NULL DEFAULT 0'],
     ['folders', 'grade_enabled', 'INTEGER NOT NULL DEFAULT 0'],
@@ -1052,14 +1054,15 @@ app.post('/api/projects', async (c) => {
     ? { todo: [], in_progress: [], done: [] }
     : normalizeStatusOptions(body.status_options);
   if (!statusOptions) return c.json({ error: 'Each status group must contain up to 20 non-empty labels of 60 characters or fewer.' }, 400);
+  const graded = body.graded === true || body.graded === 1 || body.graded === '1' || body.graded === 'true' ? 1 : 0;
 
   await db.batch([
-    db.prepare('INSERT INTO projects (id, name, description, color, default_view, non_working_days_json, holidays_json, status_options_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-      .bind(id, name, description, color, default_view, JSON.stringify(nonWorkingDays), JSON.stringify(holidays), JSON.stringify(statusOptions)),
+    db.prepare('INSERT INTO projects (id, name, description, color, default_view, non_working_days_json, holidays_json, status_options_json, graded) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .bind(id, name, description, color, default_view, JSON.stringify(nonWorkingDays), JSON.stringify(holidays), JSON.stringify(statusOptions), graded),
     db.prepare('INSERT INTO project_members (project_id, user_id, access_level) VALUES (?, ?, ?)').bind(id, user.id, 'edit')
   ]);
 
-  return c.json({ id, name, description, color, default_view, non_working_days_json: JSON.stringify(nonWorkingDays), holidays_json: JSON.stringify(holidays), status_options_json: JSON.stringify(statusOptions), user_access_level: 'edit' }, 201);
+  return c.json({ id, name, description, color, default_view, graded, non_working_days_json: JSON.stringify(nonWorkingDays), holidays_json: JSON.stringify(holidays), status_options_json: JSON.stringify(statusOptions), user_access_level: 'edit' }, 201);
 });
 
 app.get('/api/projects/:id', async (c) => {
@@ -1092,7 +1095,7 @@ app.put('/api/projects/:id', async (c) => {
   const description = sanitizeString(body.description || '', 500);
   const color = sanitizeColor(body.color);
   const default_view = ['board', 'list', 'gantt', 'folder'].includes(body.default_view) ? body.default_view : 'folder';
-  const existingProject = await db.prepare('SELECT non_working_days_json, holidays_json, status_options_json FROM projects WHERE id = ?').bind(id).first();
+  const existingProject = await db.prepare('SELECT non_working_days_json, holidays_json, status_options_json, graded FROM projects WHERE id = ?').bind(id).first();
   if (!existingProject) return c.json({ error: 'Project not found' }, 404);
   let existingDays = [0, 6];
   let existingHolidays = [];
@@ -1106,11 +1109,14 @@ app.put('/api/projects/:id', async (c) => {
   if (!cleanedStatusOptions) {
     return c.json({ error: 'Each status group must contain up to 20 non-empty labels of 60 characters or fewer.' }, 400);
   }
+  const graded = body.graded === undefined
+    ? Number(existingProject.graded) || 0
+    : body.graded === true || body.graded === 1 || body.graded === '1' || body.graded === 'true' ? 1 : 0;
 
   await db.prepare(`UPDATE projects
-    SET name = ?, description = ?, color = ?, default_view = ?, non_working_days_json = ?, holidays_json = ?, status_options_json = ?
+    SET name = ?, description = ?, color = ?, default_view = ?, non_working_days_json = ?, holidays_json = ?, status_options_json = ?, graded = ?
     WHERE id = ?`).bind(
-    name, description, color, default_view, JSON.stringify(nonWorkingDays), JSON.stringify(holidays), JSON.stringify(cleanedStatusOptions), id
+    name, description, color, default_view, JSON.stringify(nonWorkingDays), JSON.stringify(holidays), JSON.stringify(cleanedStatusOptions), graded, id
   ).run();
   return c.json({ success: true });
 });
@@ -1256,8 +1262,10 @@ app.post('/api/projects/:id/folders', async (c) => {
   const target_grade = Number(body.target_grade) || 100;
   const bonus_cap_enabled = body.bonus_cap_enabled === true || body.bonus_cap_enabled === 1
     || body.bonus_cap_enabled === '1' || body.bonus_cap_enabled === 'true' ? 1 : 0;
-  const grade_enabled = body.grade_enabled === true || body.grade_enabled === 1
-    || body.grade_enabled === '1' || body.grade_enabled === 'true' ? 1 : 0;
+  const projectSettings = await db.prepare('SELECT graded FROM projects WHERE id = ?').bind(projectId).first();
+  const grade_enabled = body.grade_enabled === undefined
+    ? Number(projectSettings?.graded) || 0
+    : body.grade_enabled === true || body.grade_enabled === 1 || body.grade_enabled === '1' || body.grade_enabled === 'true' ? 1 : 0;
 
   await db.prepare(`
     INSERT INTO folders (id, project_id, parent_id, name, description, color, weight_percent, drop_lowest_count, drop_highest_count, target_grade, bonus_cap_enabled, grade_enabled)

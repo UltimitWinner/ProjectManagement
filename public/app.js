@@ -1187,6 +1187,10 @@ function renderSidebarProjects() {
 
 function renderCurrentView() {
   if (currentProjectAccess === 'none') return;
+  const hasGrades = hasGradedCategories();
+  document.getElementById('folderViewTabLabel').textContent = hasGrades ? 'Folders & Grades' : 'Folders';
+  document.querySelector('.grade-cards-grid').classList.toggle('completion-only', !hasGrades);
+  document.querySelectorAll('.grade-info-card').forEach(element => element.classList.toggle('hidden', !hasGrades));
   if (currentView !== 'folder') calculateFolderTreeGrades();
 
   folderView.classList.remove('active');
@@ -1986,6 +1990,10 @@ function renderFolderView() {
   container.innerHTML = '';
 
   const rootFolders = folders.filter(folder => !folder.parent_id);
+  const hasGradedFolders = hasGradedCategories();
+  document.getElementById('folderViewTabLabel').textContent = hasGradedFolders ? 'Folders & Grades' : 'Folders';
+  document.querySelector('.grade-cards-grid').classList.toggle('completion-only', !hasGradedFolders);
+  document.querySelectorAll('.grade-info-card').forEach(element => element.classList.toggle('hidden', !hasGradedFolders));
   const scopeSelect = document.getElementById('gradeScopeSelect');
   if (selectedStatsFolderId === undefined || (selectedStatsFolderId && !rootFolders.some(folder => folder.id === selectedStatsFolderId))) {
     selectedStatsFolderId = rootFolders[0]?.id || null;
@@ -2079,15 +2087,15 @@ function renderFolderNode(folder, depth, gradeData) {
 
   const folderStats = gradeData.folderStats.get(folder.id) || { avg: '--', earnedRate: 0, weight: folder.weight_percent, totalCount: folderTasks.length };
 
-  const showFolderWeight = Number(folder.weight_percent) > 0 || depth > 0;
+  const showFolderWeight = isFolderGraded(folder.id) && (Number(folder.weight_percent) > 0 || depth > 0);
   const weightBadge = showFolderWeight
     ? `<span class="badge badge-custom">${escapeHtml(formatCustomFieldValue({ name: 'Grade Weight %' }, Number(folder.weight_percent) || 0))}% ${folder.bonus_cap_enabled ? 'bonus cap' : 'weight'}</span>`
     : '';
-  const dropRuleBadges = [
+  const dropRuleBadges = isFolderGraded(folder.id) ? [
     Number(folder.drop_lowest_count) > 0 ? `Drops ${Number(folder.drop_lowest_count)} lowest` : '',
     Number(folder.drop_highest_count) > 0 ? `Drops ${Number(folder.drop_highest_count)} highest` : ''
-  ].filter(Boolean).map(label => `<span class="badge badge-custom">${escapeHtml(label)}</span>`).join(' ');
-  const gradeBadge = folderStats.avg !== '--' ? `<span class="badge badge-grade">Score: ${folderStats.avg}%</span>` : '';
+  ].filter(Boolean).map(label => `<span class="badge badge-custom">${escapeHtml(label)}</span>`).join(' ') : '';
+  const gradeBadge = isFolderGraded(folder.id) && folderStats.avg !== '--' ? `<span class="badge badge-grade">Score: ${folderStats.avg}%</span>` : '';
 
   node.innerHTML = `
     <div class="folder-header-row">
@@ -2309,6 +2317,7 @@ function createTaskTreeRow(task) {
   row.dataset.taskId = task.id;
 
   const gradeText = taskGradeScoreMarkup(task);
+  const taskIsGraded = isFolderGraded(task.folder_id);
 
   // Build custom field chips for fields that have a value on this task
   const cfChips = taskCustomFieldEntries(task, customFields)
@@ -2321,11 +2330,11 @@ function createTaskTreeRow(task) {
       <span class="badge badge-${task.status}">${escapeHtml(getTaskStatusLabel(task))}</span>
       <span class="tree-task-title">${escapeHtml(task.title)}</span>
       <span class="badge badge-${task.priority}">${task.priority}</span>
-      ${task.never_drop ? '<span class="badge badge-custom">Never drop</span>' : ''}
+      ${taskIsGraded && task.never_drop ? '<span class="badge badge-custom">Never drop</span>' : ''}
       ${cfChips}
     </div>
     <div class="tree-task-meta">
-      <span class="tree-task-grade">Score: <strong>${gradeText}</strong></span>
+      ${taskIsGraded ? `<span class="tree-task-grade">Score: <strong>${gradeText}</strong></span>` : ''}
       <span class="tree-task-date">Due: ${escapeHtml(task.due_date ? formatTaskDateAndTime(task.due_date, task.due_time) : 'No due date')}</span>
       <span class="tree-task-progress">${task.progress}%</span>
       <button class="btn-secondary edit-required" style="padding: 2px 8px; font-size: 0.75rem;" data-action="edit-task">Edit</button>
@@ -2469,14 +2478,15 @@ function renderBoardView() {
 
       const folderPath = getFolderPath(task.folder_id, folders);
       const folderBadge = folderPath ? `<span class="badge badge-course">Folder: ${escapeHtml(folderPath)}</span>` : '';
-      const extraCreditBadge = task.extra_credit ? '<span class="badge badge-custom">Extra Credit · 2×</span>' : '';
-      const neverDropBadge = task.never_drop ? '<span class="badge badge-custom">Never drop</span>' : '';
+      const taskIsGraded = isFolderGraded(task.folder_id);
+      const extraCreditBadge = taskIsGraded && task.extra_credit ? '<span class="badge badge-custom">Extra Credit · 2×</span>' : '';
+      const neverDropBadge = taskIsGraded && task.never_drop ? '<span class="badge badge-custom">Never drop</span>' : '';
       applyTaskFolderColor(card, task);
 
       let gradeBadge = '';
-      if (task.grade !== null && task.grade !== undefined) {
+      if (taskIsGraded && task.grade !== null && task.grade !== undefined) {
         gradeBadge = `<span class="badge badge-grade">Grade: ${taskGradeScoreMarkup(task)}</span>`;
-      } else if (task.earned_points !== null && task.earned_points !== undefined && task.max_points) {
+      } else if (taskIsGraded && task.earned_points !== null && task.earned_points !== undefined && task.max_points) {
         gradeBadge = `<span class="badge badge-grade">Score: ${taskGradeScoreMarkup(task)}</span>`;
       }
 
@@ -2548,7 +2558,7 @@ function renderListView() {
     ['Grade / Score', 'grade'], ['Dependencies', null], ['Progress', 'progress'],
     ...customFields.map(f => [f.name, `custom:${f.id}`]),
     ['Actions', null]
-  ];
+  ].filter(([label]) => label !== 'Grade / Score' || hasGradedCategories());
 
   const columnLabels = new Map(cols.filter(([, key]) => key).map(([label, key]) => [key, label]));
   columnLabels.set('manual_order', 'Saved order');
@@ -2618,18 +2628,18 @@ function renderListView() {
     tr.draggable = currentProjectAccess === 'edit';
     applyTaskFolderColor(tr, task);
     const folderPath = getFolderPath(task.folder_id, folders);
-
-    const gradeText = taskGradeScoreMarkup(task);
+    const taskIsGraded = isFolderGraded(task.folder_id);
+    const gradeText = taskIsGraded ? taskGradeScoreMarkup(task) : '-';
 
     tr.innerHTML = `
       <td><input type="checkbox" class="task-select-checkbox" aria-label="Select task" ${selectedTaskIds.has(task.id) ? 'checked' : ''} ${currentProjectAccess === 'none' ? 'disabled' : ''}></td>
       <td><span class="badge badge-${task.status}">${escapeHtml(getTaskStatusLabel(task))}</span></td>
-      <td style="font-weight: 600;">${escapeHtml(task.title)}${task.extra_credit ? ' <span class="badge badge-custom">Extra Credit</span>' : ''}${task.never_drop ? ' <span class="badge badge-custom">Never drop</span>' : ''}</td>
+      <td style="font-weight: 600;">${escapeHtml(task.title)}${taskIsGraded && task.extra_credit ? ' <span class="badge badge-custom">Extra Credit</span>' : ''}${taskIsGraded && task.never_drop ? ' <span class="badge badge-custom">Never drop</span>' : ''}</td>
       <td><span class="badge badge-course folder-path-badge">${escapeHtml(folderPath || '-')}</span></td>
       <td><span class="badge badge-${task.priority}">${task.priority}</span></td>
       <td>${escapeHtml(formatTaskDateAndTime(task.start_date, task.start_time))}</td>
       <td>${escapeHtml(formatTaskDateAndTime(task.due_date, task.due_time))}</td>
-      <td><strong class="list-grade-value">${gradeText}</strong></td>
+      ${hasGradedCategories() ? `<td><strong class="list-grade-value">${gradeText}</strong></td>` : ''}
       <td>${task.dependencies?.length ? `${task.dependencies.length} dependencies` : '-'}</td>
       <td>${task.progress}%</td>
       ${customFields.map(f => {
@@ -3014,6 +3024,7 @@ function populateTaskFolderDropdown(selectedFolderId = '') {
 }
 
 function isFolderGraded(folderId) {
+  if (!currentProject?.graded) return false;
   const foldersById = new Map(folders.map(folder => [folder.id, folder]));
   const visited = new Set();
   let folder = foldersById.get(folderId);
@@ -3023,6 +3034,10 @@ function isFolderGraded(folderId) {
     folder = foldersById.get(folder.parent_id);
   }
   return false;
+}
+
+function hasGradedCategories() {
+  return Boolean(currentProject?.graded) && folders.some(folder => Boolean(folder.grade_enabled));
 }
 
 function updateTaskGradeFieldVisibility() {
@@ -3269,6 +3284,10 @@ function populateParentFolderDropdown(selectedParentId = '', excludeFolderId = '
 }
 
 function openFolderModal(folderToEdit = null, presetParentId = '') {
+  const projectAllowsGrades = Boolean(currentProject?.graded);
+  document.getElementById('folderGradedSetting').classList.toggle('hidden', !projectAllowsGrades);
+  document.getElementById('folderGradedHelp').classList.toggle('hidden', projectAllowsGrades);
+  document.querySelectorAll('#folderModal .project-grade-controls').forEach(element => element.classList.toggle('hidden', !projectAllowsGrades));
   if (folderToEdit) {
     document.getElementById('folderModalTitle').textContent = 'Edit Folder / Subfolder';
     document.getElementById('folderId').value = folderToEdit.id;
@@ -3291,7 +3310,7 @@ function openFolderModal(folderToEdit = null, presetParentId = '') {
     document.getElementById('folderDropLowest').value = '0';
     document.getElementById('folderDropHighest').value = '0';
     document.getElementById('folderBonusCap').checked = false;
-    document.getElementById('folderGradeEnabled').checked = false;
+    document.getElementById('folderGradeEnabled').checked = Boolean(currentProject?.graded);
     document.getElementById('folderColor').value = '#25c2fd';
     populateParentFolderDropdown(presetParentId);
     document.getElementById('btnDeleteFolder').classList.add('hidden');
@@ -3532,6 +3551,7 @@ function openProjectModal(projectToEdit = null) {
     document.getElementById('projDesc').value = projectToEdit.description || '';
     document.getElementById('projColor').value = projectToEdit.color || '#38d8aa';
     document.getElementById('projDefaultView').value = projectToEdit.default_view || 'folder';
+    document.getElementById('projGraded').checked = Boolean(projectToEdit.graded);
     document.getElementById('btnDeleteProject').classList.remove('hidden');
   } else {
     document.getElementById('projectModalTitle').textContent = 'New Project / Workflow';
@@ -3540,6 +3560,7 @@ function openProjectModal(projectToEdit = null) {
     document.getElementById('projDesc').value = '';
     document.getElementById('projColor').value = '#38d8aa';
     document.getElementById('projDefaultView').value = 'folder';
+    document.getElementById('projGraded').checked = false;
     document.getElementById('btnDeleteProject').classList.add('hidden');
   }
   let statusOptions = { todo: [], in_progress: [], done: [] };
@@ -3559,6 +3580,7 @@ async function handleSaveProject(e) {
   const description = document.getElementById('projDesc').value;
   const color = document.getElementById('projColor').value;
   const default_view = document.getElementById('projDefaultView').value;
+  const graded = document.getElementById('projGraded').checked;
   const non_working_days = Array.from(document.querySelectorAll('.project-day-checkbox:checked')).map(input => Number(input.value));
   const holidays = [...projectHolidayDraft];
   const status_options = {
@@ -3571,7 +3593,7 @@ async function handleSaveProject(e) {
     if (id) {
       await api(`/api/projects/${id}`, {
         method: 'PUT',
-        body: JSON.stringify({ name, description, color, default_view, non_working_days, holidays, status_options })
+        body: JSON.stringify({ name, description, color, default_view, graded, non_working_days, holidays, status_options })
       });
       projectModal.classList.add('hidden');
       await loadProjects();
@@ -3579,7 +3601,7 @@ async function handleSaveProject(e) {
     } else {
       const newProj = await api('/api/projects', {
         method: 'POST',
-        body: JSON.stringify({ name, description, color, default_view, non_working_days, holidays, status_options })
+        body: JSON.stringify({ name, description, color, default_view, graded, non_working_days, holidays, status_options })
       });
       projectModal.classList.add('hidden');
       await loadProjects();

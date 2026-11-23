@@ -873,6 +873,15 @@ body {
   margin-bottom: 1.5rem;
 }
 
+.grade-cards-grid.completion-only {
+  grid-template-columns: minmax(0, 1fr);
+  margin-bottom: 1rem;
+}
+
+.grade-cards-grid.completion-only .grade-card.pace {
+  max-width: 420px;
+}
+
 .grade-scope-control {
   grid-column: 1 / -1;
   display: flex;
@@ -2016,6 +2025,23 @@ body {
   width: auto;
   margin: 0;
   accent-color: var(--accent);
+}
+
+.folder-graded-setting {
+  padding: 0.8rem 0.9rem;
+  border: 1px solid var(--tag-border);
+  border-radius: var(--radius-md);
+  background: var(--tag-bg);
+}
+
+.folder-graded-setting .folder-bonus-cap-toggle {
+  min-height: 32px;
+  color: var(--text-primary);
+}
+
+.folder-graded-setting input[type="checkbox"] {
+  width: 1.15rem;
+  height: 1.15rem;
 }
 
 .form-row {
