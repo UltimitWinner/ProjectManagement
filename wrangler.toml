@@ -11,3 +11,6 @@ binding = "DB"
 database_name = "pm_db"
 database_id = "1518141d-1f44-451e-a10c-feac74d0627b"
 migrations_dir = "migrations"
+
+[triggers]
+crons = ["* * * * *"]

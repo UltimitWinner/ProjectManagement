@@ -72,6 +72,81 @@
     </div>
   </div>
 
+  <div id="emailPreferencesModal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2>Email Preferences</h2>
+        <button class="modal-close" id="btnCloseEmailPreferences" type="button" aria-label="Close">&times;</button>
+      </div>
+      <form id="emailPreferencesForm">
+        <div class="form-group form-checkbox-group">
+          <label for="emailEnabled">
+            <input type="checkbox" id="emailEnabled">
+            Receive daily digest emails
+          </label>
+        </div>
+        <div id="emailDigestFields" class="hidden">
+          <div class="form-group">
+            <label for="notificationEmail">Email address *</label>
+            <input type="email" id="notificationEmail" maxlength="254" autocomplete="email" placeholder="you@example.com">
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="dailyDigestTime">Send daily at</label>
+              <input type="time" id="dailyDigestTime" value="08:00" required>
+            </div>
+            <div class="form-group">
+              <label for="dailyDigestTimezone">Time zone</label>
+              <select id="dailyDigestTimezone" required></select>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="digestLookaheadDays">Include tasks due today and the next</label>
+              <div class="inline-input-with-suffix">
+                <input type="number" id="digestLookaheadDays" min="0" max="30" step="1" value="7" required>
+                <span>days</span>
+              </div>
+              <small class="form-hint">Set to 0 to include tasks due today only. Maximum 30 days.</small>
+            </div>
+          </div>
+          <div class="form-group form-checkbox-group">
+            <label for="digestOverdue"><input type="checkbox" id="digestOverdue"> Include overdue tasks</label>
+            <label for="digestUndatedOpen"><input type="checkbox" id="digestUndatedOpen"> Include open tasks with no start or due date</label>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="digestWeekendDelivery">Weekend emails</label>
+              <select id="digestWeekendDelivery">
+                <option value="always">Send every day, including weekends</option>
+                <option value="never">Skip weekends</option>
+                <option value="due_today">On project weekends, send only if a digest task is due today</option>
+                <option value="if_content">On project weekends, send only if the digest has tasks</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="digestHolidayDelivery">Project holiday emails</label>
+              <select id="digestHolidayDelivery">
+                <option value="always">Send every day, including project holidays</option>
+                <option value="never">Skip project holidays</option>
+                <option value="due_today">On project holidays, send only if a digest task is due today</option>
+                <option value="if_content">On project holidays, send only if the digest has tasks</option>
+              </select>
+            </div>
+          </div>
+          <p class="form-hint">Weekend rules use each project’s non-working weekdays, and holiday rules use that project’s holiday calendar. Rules apply per project. “Only if the digest has tasks” includes future tasks such as one due tomorrow. Completed one-time tasks are omitted; repeating tasks show their next non-overdue occurrence.</p>
+        </div>
+        <p id="emailSenderStatus" class="form-hint" role="status"></p>
+        <p id="emailPreferencesStatus" class="form-hint hidden" role="status"></p>
+        <div class="modal-footer">
+          <div class="footer-spacer"></div>
+          <button type="button" class="btn-secondary" id="btnCancelEmailPreferences">Close</button>
+          <button type="submit" class="btn-primary">Save preferences</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <!-- Main Application Container -->
   <div class="app-container">
     <!-- Sidebar -->
@@ -97,6 +172,12 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-4 h-4">
             <rect x="4" y="10" width="16" height="11" rx="2" />
             <path d="M8 10V7a4 4 0 1 1 8 0v3" />
+          </svg>
+        </button>
+        <button id="btnEmailPreferences" class="btn-user-switch" title="Email Preferences" aria-label="Email preferences">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-4 h-4" aria-hidden="true">
+            <rect x="3" y="5" width="18" height="14" rx="2" />
+            <path d="m3 7 9 6 9-6" />
           </svg>
         </button>
         <button id="btnLogout" class="btn-user-switch" title="Log Out / Switch Account">

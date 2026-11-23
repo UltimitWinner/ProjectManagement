@@ -1,4 +1,5 @@
 import { Hono } from 'hono';
+import { getNextTaskOccurrence } from '../public/task-utils.js';
 
 const app = new Hono();
 
@@ -137,6 +138,331 @@ function normalizeRepeatRule(body) {
   return { valid: true, frequency, interval, until };
 }
 
+function emailEscape(value) {
+  return String(value ?? '').replace(/[&<>"']/g, character => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[character]);
+}
+
+function normalizedAppUrl(value) {
+  try {
+    const url = new URL(String(value || ''));
+    return url.protocol === 'https:' || url.protocol === 'http:' ? url.origin : '';
+  } catch {
+    return '';
+  }
+}
+
+function zonedDateTime(date, timeZone) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return {
+    date: `${values.year}-${values.month}-${values.day}`,
+    time: `${values.hour}:${values.minute}`
+  };
+}
+
+function calendarDayDifference(fromDate, toDate) {
+  return Math.round((new Date(`${toDate}T00:00:00Z`).getTime() - new Date(`${fromDate}T00:00:00Z`).getTime()) / 86400000);
+}
+
+function emailDate(dateValue, options = { weekday: 'short', month: 'short', day: 'numeric' }) {
+  if (!dateValue) return '';
+  return new Date(`${dateValue}T00:00:00Z`).toLocaleDateString('en-US', { ...options, timeZone: 'UTC' });
+}
+
+async function collectDailyDigest(db, user, preferences, localDate) {
+  const userId = user.id || user.user_id;
+  const lookaheadDays = Number.isInteger(Number(preferences.lookahead_days))
+    ? Math.min(30, Math.max(0, Number(preferences.lookahead_days))) : 7;
+  const throughDate = new Date(`${localDate}T00:00:00.000Z`);
+  throughDate.setUTCDate(throughDate.getUTCDate() + lookaheadDays);
+  const lastIncludedDate = throughDate.toISOString().slice(0, 10);
+  const { results } = await db.prepare(`
+    SELECT t.*, p.id AS calendar_project_id, p.name AS project_name,
+      p.holidays_json, p.non_working_days_json, f.name AS folder_name
+    FROM projects p
+    LEFT JOIN tasks t ON t.project_id = p.id AND (
+      (
+        t.repeat_frequency IS NOT NULL AND t.repeat_frequency != ''
+        AND COALESCE(NULLIF(t.start_date, ''), NULLIF(t.due_date, '')) <= ?
+        AND (t.repeat_until IS NULL OR t.repeat_until >= ?)
+      )
+      OR (
+        t.status != 'done'
+        AND (
+          (COALESCE(NULLIF(t.due_date, ''), NULLIF(t.start_date, '')) IS NOT NULL
+            AND COALESCE(NULLIF(t.due_date, ''), NULLIF(t.start_date, '')) <= ?
+            AND (? = 1 OR COALESCE(NULLIF(t.due_date, ''), NULLIF(t.start_date, '')) >= ?))
+          OR (? = 1 AND NULLIF(t.due_date, '') IS NULL AND NULLIF(t.start_date, '') IS NULL)
+        )
+      )
+    )
+    LEFT JOIN folders f ON f.id = t.folder_id
+    WHERE (
+      EXISTS (
+        SELECT 1 FROM project_members pm
+        WHERE pm.project_id = p.id AND pm.user_id = ? AND pm.access_level != 'none'
+      )
+      OR (
+        ? = 'admin' AND NOT EXISTS (
+          SELECT 1 FROM project_members admin_pm
+          WHERE admin_pm.project_id = p.id AND admin_pm.user_id = ? AND admin_pm.access_level = 'none'
+        )
+      )
+    )
+  `).bind(lastIncludedDate, localDate, lastIncludedDate, preferences.include_overdue ? 1 : 0,
+    localDate, preferences.include_undated_open ? 1 : 0,
+    userId, user.system_role || 'user', userId).all();
+
+  const groups = { overdue: [], dueToday: [], upcoming: [], undated: [], lookaheadDays, suppressEmpty: false };
+  const projectInfo = new Map();
+  for (const task of results || []) {
+    const projectId = task.calendar_project_id;
+    let holidays = [];
+    try { holidays = JSON.parse(task.holidays_json || '[]'); } catch { }
+    holidays = normalizeHolidayDates(holidays, []);
+    let nonWorkingDays;
+    try { nonWorkingDays = JSON.parse(task.non_working_days_json || '[0,6]'); } catch { nonWorkingDays = [0, 6]; }
+    nonWorkingDays = normalizeCalendarDays(nonWorkingDays, [0, 6]);
+    const weekday = new Date(`${localDate}T00:00:00.000Z`).getUTCDay();
+    const projectIsWeekend = nonWorkingDays.includes(weekday);
+    const projectIsHoliday = holidays.includes(localDate);
+    if (!projectInfo.has(projectId)) {
+      projectInfo.set(projectId, {
+        isWeekend: projectIsWeekend,
+        isHoliday: projectIsHoliday,
+        dueTodayCount: 0,
+        items: []
+      });
+    }
+    if (!task.id) continue;
+
+    const isRepeating = Boolean(task.repeat_frequency);
+    if (task.status === 'done' && !isRepeating) continue;
+    if (isRepeating && task.repeat_until && task.repeat_until < localDate) continue;
+
+    let occurrenceFromDate = localDate;
+    if (isRepeating && task.start_date && task.due_date) {
+      const dueOffset = calendarDayDifference(task.start_date, task.due_date);
+      if (dueOffset < 0) {
+        const nextDueCandidate = new Date(`${localDate}T00:00:00.000Z`);
+        nextDueCandidate.setUTCDate(nextDueCandidate.getUTCDate() - dueOffset);
+        occurrenceFromDate = nextDueCandidate.toISOString().slice(0, 10);
+      }
+    }
+    const occurrence = isRepeating ? getNextTaskOccurrence(task, occurrenceFromDate, holidays) : task;
+    if (!occurrence) continue;
+    const dueDate = occurrence.due_date || occurrence.start_date;
+    const taskInfo = projectInfo.get(projectId);
+    if (!dueDate) {
+      if (!isRepeating && preferences.include_undated_open && task.status !== 'done') {
+        const item = {
+          title: task.title,
+          project: task.project_name,
+          projectId,
+          folder: task.folder_name || '',
+          dueDate: '',
+          dueTime: '',
+          priority: task.priority || 'medium',
+          status: task.status_label || task.status || 'todo',
+          repeating: false
+        };
+        groups.undated.push(item);
+        taskInfo.items.push(item);
+      }
+      continue;
+    }
+    const daysAhead = calendarDayDifference(localDate, dueDate);
+    if (isRepeating && dueDate < localDate) continue;
+    const item = {
+      title: task.title,
+      project: task.project_name,
+      projectId,
+      folder: task.folder_name || '',
+      dueDate,
+      dueTime: occurrence.due_date ? (occurrence.due_time || '') : (occurrence.start_time || ''),
+      priority: task.priority || 'medium',
+      status: isRepeating ? 'Repeating' : (task.status_label || task.status || 'todo'),
+      repeating: isRepeating
+    };
+
+    if (daysAhead === 0) taskInfo.dueTodayCount += 1;
+    if (daysAhead < 0 && preferences.include_overdue) groups.overdue.push(item);
+    else if (daysAhead === 0) groups.dueToday.push(item);
+    else if (daysAhead > 0 && daysAhead <= lookaheadDays) groups.upcoming.push(item);
+    if (daysAhead < 0 ? preferences.include_overdue : daysAhead <= lookaheadDays) taskInfo.items.push(item);
+  }
+
+  const projectModes = project => {
+    const modes = [];
+    if (project.isWeekend) modes.push(preferences.weekend_delivery || 'always');
+    if (project.isHoliday) modes.push(preferences.holiday_delivery || 'always');
+    return modes;
+  };
+  const excludedProjects = new Set();
+  for (const [projectId, info] of projectInfo) {
+    const modes = projectModes(info);
+    if (modes.some(mode => mode !== 'always')) groups.suppressEmpty = true;
+    if (modes.includes('never')
+      || (modes.includes('due_today') && info.dueTodayCount === 0)
+      || (modes.includes('if_content') && info.items.length === 0)) {
+      excludedProjects.add(projectId);
+    }
+  }
+  if (excludedProjects.size) {
+    for (const key of ['overdue', 'dueToday', 'upcoming', 'undated']) {
+      groups[key] = groups[key].filter(item => !excludedProjects.has(item.projectId));
+    }
+  }
+  for (const key of ['overdue', 'dueToday', 'upcoming', 'undated']) {
+    for (const item of groups[key]) delete item.projectId;
+    groups[key].sort((a, b) => a.dueDate.localeCompare(b.dueDate) || a.title.localeCompare(b.title));
+  }
+  return groups;
+}
+
+function buildDailyDigestEmail(user, localDate, groups, appUrl = '') {
+  const counts = {
+    overdue: groups.overdue.length,
+    dueToday: groups.dueToday.length,
+    upcoming: groups.upcoming.length,
+    undated: groups.undated.length
+  };
+  const total = counts.overdue + counts.dueToday + counts.upcoming;
+  const dateLabel = emailDate(localDate, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' });
+  const sections = [
+    ['overdue', 'Overdue', '#b42318'],
+    ['dueToday', 'Due today', '#b54708'],
+    ['upcoming', `Coming up · next ${groups.lookaheadDays} day${groups.lookaheadDays === 1 ? '' : 's'}`, '#176b87'],
+    ['undated', 'Open · no date set', '#6941c6']
+  ].filter(([key]) => groups[key].length);
+
+  const sectionHtml = sections.map(([key, heading, accent]) => `
+    <tr><td style="padding:24px 28px 8px;"><h2 style="margin:0;color:${accent};font-size:16px;line-height:22px;">${heading} <span style="font-size:12px;font-weight:500;color:#667085;">${groups[key].length}</span></h2></td></tr>
+    ${groups[key].map(task => `
+      <tr><td style="padding:8px 28px;">
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border:1px solid #e4e7ec;border-radius:10px;background:#fff;">
+          <tr><td style="padding:14px 16px;border-left:4px solid ${accent};">
+            <div style="font-size:15px;font-weight:650;line-height:21px;color:#182230;">${emailEscape(task.title)}</div>
+            <div style="padding-top:5px;font-size:12px;line-height:18px;color:#667085;">${emailEscape(task.project)}${task.folder ? ` · ${emailEscape(task.folder)}` : ''}</div>
+            <div style="padding-top:10px;font-size:12px;line-height:18px;color:#344054;">${emailEscape(emailDate(task.dueDate, { month: 'short', day: 'numeric' }))}${task.dueTime ? ` · ${emailEscape(task.dueTime)}` : ''} <span style="padding-left:8px;text-transform:capitalize;color:#667085;">${emailEscape(task.priority)}</span>${task.repeating ? ' <span style="padding-left:8px;color:#176b87;">Repeating</span>' : ''}</div>
+          </td></tr>
+        </table>
+      </td></tr>
+    `).join('')}
+  `).join('');
+  const openLink = appUrl
+    ? `<tr><td align="center" style="padding:26px 28px 10px;"><a href="${emailEscape(appUrl)}" style="display:inline-block;padding:11px 20px;border-radius:8px;background:#178c78;color:#fff;text-decoration:none;font-size:14px;font-weight:650;">Open MyPlan</a></td></tr>`
+    : '';
+  const html = `<!doctype html><html><body style="margin:0;padding:0;background:#f2f4f7;font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;color:#182230;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f2f4f7;padding:28px 12px;"><tr><td align="center">
+      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:640px;border-collapse:separate;border-spacing:0;background:#fff;border:1px solid #e4e7ec;border-radius:16px;overflow:hidden;">
+        <tr><td style="padding:24px 28px;background:#132a3a;color:#fff;"><div style="font-size:12px;letter-spacing:1.5px;text-transform:uppercase;color:#a5f3e3;font-weight:700;">MYPLAN · DAILY DIGEST</div><h1 style="margin:11px 0 0;font-size:24px;line-height:31px;color:#fff;">Your day, at a glance</h1><div style="padding-top:5px;font-size:14px;color:#d0d5dd;">${emailEscape(dateLabel)}</div></td></tr>
+        <tr><td style="padding:20px 28px 4px;"><p style="margin:0;font-size:15px;line-height:22px;color:#344054;">Hi ${emailEscape(user.name || user.username)}, here’s what needs your attention.</p></td></tr>
+        <tr><td style="padding:16px 28px 0;"><table role="presentation" width="100%" cellspacing="0" cellpadding="0"><tr>
+          <td style="padding:12px;background:#fff5f4;border-radius:9px;text-align:center;"><div style="font-size:20px;font-weight:700;color:#b42318;">${counts.overdue}</div><div style="font-size:11px;color:#667085;">OVERDUE</div></td><td width="8"></td>
+          <td style="padding:12px;background:#fffaeb;border-radius:9px;text-align:center;"><div style="font-size:20px;font-weight:700;color:#b54708;">${counts.dueToday}</div><div style="font-size:11px;color:#667085;">DUE TODAY</div></td><td width="8"></td>
+          <td style="padding:12px;background:#eff8ff;border-radius:9px;text-align:center;"><div style="font-size:20px;font-weight:700;color:#176b87;">${counts.upcoming}</div><div style="font-size:11px;color:#667085;">${groups.lookaheadDays === 0 ? 'TODAY ONLY' : `NEXT ${groups.lookaheadDays} DAYS`}</div></td><td width="8"></td>
+          <td style="padding:12px;background:#f4f3ff;border-radius:9px;text-align:center;"><div style="font-size:20px;font-weight:700;color:#6941c6;">${counts.undated}</div><div style="font-size:11px;color:#667085;">NO DATE</div></td>
+        </tr></table></td></tr>
+        ${sectionHtml || '<tr><td style="padding:30px 28px;text-align:center;color:#667085;font-size:14px;">You’re all caught up. No tasks match this digest.</td></tr>'}
+        ${openLink}
+        <tr><td style="padding:24px 28px 26px;text-align:center;color:#98a2b3;font-size:11px;line-height:17px;">You’re receiving this because daily digest emails are enabled for your MyPlan account.</td></tr>
+      </table>
+    </td></tr></table>
+  </body></html>`;
+  const textLines = [`MYPLAN DAILY DIGEST — ${dateLabel}`, `Hi ${user.name || user.username}, here’s what needs your attention.`, `${total} task${total === 1 ? '' : 's'} in this digest.`, ''];
+  for (const [key, heading] of [['overdue', 'OVERDUE'], ['dueToday', 'DUE TODAY'], ['upcoming', `COMING UP · NEXT ${groups.lookaheadDays} DAYS`], ['undated', 'OPEN · NO DATE SET']]) {
+    if (!groups[key].length) continue;
+    textLines.push(heading);
+    for (const task of groups[key]) textLines.push(`• ${task.title} — ${task.project}${task.folder ? ` / ${task.folder}` : ''}${task.dueDate ? ` — ${task.dueDate}${task.dueTime ? ` ${task.dueTime}` : ''}` : ' — No date set'}${task.repeating ? ' — Repeating' : ''}`);
+    textLines.push('');
+  }
+  if (appUrl) textLines.push(`Open MyPlan: ${appUrl}`);
+  return { subject: `MyPlan daily digest · ${dateLabel}`, html, text: textLines.join('\n') };
+}
+
+function isEmailSenderConfigured(env) {
+  return Boolean(env.GMAIL_ADDRESS && env.GMAIL_APP_PASSWORD);
+}
+
+async function sendDigestEmail(env, email, message, idempotencyKey) {
+  const { sendGmailSmtp } = await import('./gmail-smtp.js');
+  return sendGmailSmtp({
+    address: env.GMAIL_ADDRESS,
+    appPassword: env.GMAIL_APP_PASSWORD,
+    recipient: email,
+    message,
+    idempotencyKey
+  });
+}
+
+async function runDailyDigestSchedule(env, now = new Date()) {
+  if (!isEmailSenderConfigured(env)) {
+    console.warn('Daily digests are enabled but GMAIL_ADDRESS or GMAIL_APP_PASSWORD is not configured.');
+    return { processed: 0, sent: 0, empty: 0, failed: 0, configured: false };
+  }
+
+  const { results: preferences } = await env.DB.prepare(`
+    SELECT p.*, u.name, u.username, u.system_role
+    FROM user_email_preferences p
+    JOIN users u ON u.id = p.user_id
+    WHERE p.email_enabled = 1 AND p.email IS NOT NULL AND p.email != ''
+    ORDER BY p.updated_at ASC
+  `).all();
+
+  const stats = { processed: 0, sent: 0, skipped: 0, failed: 0, configured: true };
+  for (const preference of preferences || []) {
+    if (stats.processed >= 10) break; // Allow headroom under the Workers Free subrequest limit.
+    let localNow;
+    try { localNow = zonedDateTime(now, preference.timezone || 'UTC'); }
+    catch { continue; }
+    if (localNow.time < preference.daily_digest_time) continue;
+
+    const claim = await env.DB.prepare(`
+      INSERT INTO email_digest_deliveries (user_id, local_date, status, attempts, updated_at)
+      VALUES (?, ?, 'sending', 1, CURRENT_TIMESTAMP)
+      ON CONFLICT(user_id, local_date) DO UPDATE SET
+        status = 'sending', attempts = email_digest_deliveries.attempts + 1,
+        provider_error = NULL, updated_at = CURRENT_TIMESTAMP
+      WHERE (email_digest_deliveries.status = 'failed' AND email_digest_deliveries.updated_at < datetime('now', '-5 minutes'))
+        OR (email_digest_deliveries.status = 'sending' AND email_digest_deliveries.updated_at < datetime('now', '-10 minutes'))
+      RETURNING user_id
+    `).bind(preference.user_id, localNow.date).first();
+    if (!claim) continue;
+    stats.processed += 1;
+
+    try {
+      const groups = await collectDailyDigest(env.DB, preference, preference, localNow.date);
+      const digestItemCount = groups.overdue.length + groups.dueToday.length
+        + groups.upcoming.length + groups.undated.length;
+      if (groups.suppressEmpty && digestItemCount === 0) {
+        await env.DB.prepare(`UPDATE email_digest_deliveries SET status = 'skipped', provider_error = 'No digest content for this project day', updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND local_date = ?`)
+          .bind(preference.user_id, localNow.date).run();
+        stats.skipped += 1;
+        continue;
+      }
+      const message = buildDailyDigestEmail(preference, localNow.date, groups, normalizedAppUrl(env.APP_URL));
+      const messageId = await sendDigestEmail(env, preference.email, message, `myplan-daily-digest/${preference.user_id}/${localNow.date}`);
+      await env.DB.prepare(`UPDATE email_digest_deliveries SET status = 'sent', provider_message_id = ?, provider_error = NULL, updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND local_date = ?`)
+        .bind(messageId, preference.user_id, localNow.date).run();
+      stats.sent += 1;
+    } catch (error) {
+      const providerError = sanitizeString(error?.message || 'Email delivery failed.', 500);
+      await env.DB.prepare(`UPDATE email_digest_deliveries SET status = 'failed', provider_error = ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND local_date = ?`)
+        .bind(providerError, preference.user_id, localNow.date).run();
+      stats.failed += 1;
+      console.error(`Daily digest delivery failed for account ${preference.user_id}: ${providerError}`);
+    }
+  }
+  return stats;
+}
+
 async function rateLimitKey(value, pepper) {
   const bytes = new TextEncoder().encode(`${pepper}:${value}`);
   const digest = await crypto.subtle.digest('SHA-256', bytes);
@@ -202,6 +528,34 @@ async function initializeTables(db) {
       system_role TEXT NOT NULL DEFAULT 'user',
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS user_email_preferences (
+      user_id TEXT PRIMARY KEY,
+      email TEXT DEFAULT NULL,
+      email_enabled INTEGER NOT NULL DEFAULT 0,
+      daily_digest_time TEXT NOT NULL DEFAULT '08:00',
+      timezone TEXT NOT NULL DEFAULT 'UTC',
+      include_overdue INTEGER NOT NULL DEFAULT 1,
+      include_due_today INTEGER NOT NULL DEFAULT 1,
+      include_upcoming INTEGER NOT NULL DEFAULT 1,
+      lookahead_days INTEGER NOT NULL DEFAULT 7,
+      include_undated_open INTEGER NOT NULL DEFAULT 0,
+      weekend_delivery TEXT NOT NULL DEFAULT 'always',
+      holiday_delivery TEXT NOT NULL DEFAULT 'always',
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS email_digest_deliveries (
+      user_id TEXT NOT NULL,
+      local_date TEXT NOT NULL,
+      status TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      provider_message_id TEXT DEFAULT NULL,
+      provider_error TEXT DEFAULT NULL,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY(user_id, local_date),
+      FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    )`),
+    db.prepare('CREATE INDEX IF NOT EXISTS idx_user_email_preferences_enabled ON user_email_preferences(email_enabled, daily_digest_time)'),
     db.prepare(`CREATE TABLE IF NOT EXISTS project_members (
       project_id TEXT NOT NULL,
       user_id TEXT NOT NULL,
@@ -350,6 +704,10 @@ async function initializeTables(db) {
     ['tasks', 'due_time', 'TEXT'],
     ['tasks', 'open_at', 'TEXT'],
     ['tasks', 'status_label', "TEXT NOT NULL DEFAULT ''"],
+    ['user_email_preferences', 'lookahead_days', 'INTEGER NOT NULL DEFAULT 7'],
+    ['user_email_preferences', 'include_undated_open', 'INTEGER NOT NULL DEFAULT 0'],
+    ['user_email_preferences', 'weekend_delivery', "TEXT NOT NULL DEFAULT 'always'"],
+    ['user_email_preferences', 'holiday_delivery', "TEXT NOT NULL DEFAULT 'always'"],
   ]) {
     try { await db.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`).run(); } catch (e) { }
   }
@@ -837,6 +1195,85 @@ app.get('/api/auth/me', async (c) => {
     return c.json({ error: 'Unauthenticated. Login required.' }, 401);
   }
   return c.json({ user });
+});
+
+app.get('/api/notifications/preferences', async (c) => {
+  const user = await getAuthenticatedUser(c);
+  if (!user) return c.json({ error: 'Authentication required' }, 401);
+
+  const row = await c.env.DB.prepare('SELECT * FROM user_email_preferences WHERE user_id = ?').bind(user.id).first();
+  return c.json({
+    hasSaved: Boolean(row),
+    senderConfigured: isEmailSenderConfigured(c.env),
+    preferences: row ? {
+      email: row.email || '',
+      email_enabled: Boolean(row.email_enabled),
+      daily_digest_time: row.daily_digest_time || '08:00',
+      timezone: row.timezone || 'UTC',
+      include_overdue: Boolean(row.include_overdue),
+      lookahead_days: Number.isInteger(Number(row.lookahead_days)) ? Number(row.lookahead_days) : 7,
+      include_undated_open: Boolean(row.include_undated_open),
+      weekend_delivery: row.weekend_delivery || 'always',
+      holiday_delivery: row.holiday_delivery || 'always'
+    } : {
+      email: '', email_enabled: false, daily_digest_time: '08:00', timezone: 'UTC',
+      include_overdue: true, lookahead_days: 7, include_undated_open: false,
+      weekend_delivery: 'always', holiday_delivery: 'always'
+    }
+  });
+});
+
+app.put('/api/notifications/preferences', async (c) => {
+  const user = await getAuthenticatedUser(c);
+  if (!user) return c.json({ error: 'Authentication required' }, 401);
+
+  let body;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON payload' }, 400); }
+  const email_enabled = body.email_enabled === true || body.email_enabled === 1 || body.email_enabled === 'true';
+  const email = sanitizeString(body.email || '', 254).toLowerCase();
+  if (email_enabled && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return c.json({ error: 'Enter a valid email address to receive digests.' }, 400);
+  }
+  const daily_digest_time = typeof body.daily_digest_time === 'string' && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(body.daily_digest_time)
+    ? body.daily_digest_time : null;
+  if (!daily_digest_time) return c.json({ error: 'Choose a valid daily send time.' }, 400);
+  const timezone = sanitizeString(body.timezone || '', 100);
+  try { new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format(new Date()); }
+  catch { return c.json({ error: 'Choose a valid time zone.' }, 400); }
+
+  const include_overdue = body.include_overdue === true || body.include_overdue === 1 || body.include_overdue === 'true' ? 1 : 0;
+  const lookahead_days = Number(body.lookahead_days);
+  if (!Number.isInteger(lookahead_days) || lookahead_days < 0 || lookahead_days > 30) {
+    return c.json({ error: 'Choose a look-ahead window from 0 to 30 days.' }, 400);
+  }
+  const include_undated_open = body.include_undated_open === true || body.include_undated_open === 1 || body.include_undated_open === 'true' ? 1 : 0;
+  const validDeliveryModes = ['always', 'never', 'due_today', 'if_content'];
+  const weekend_delivery = validDeliveryModes.includes(body.weekend_delivery) ? body.weekend_delivery : null;
+  const holiday_delivery = validDeliveryModes.includes(body.holiday_delivery) ? body.holiday_delivery : null;
+  if (!weekend_delivery || !holiday_delivery) {
+    return c.json({ error: 'Choose valid weekend and holiday delivery options.' }, 400);
+  }
+
+  await c.env.DB.prepare(`
+    INSERT INTO user_email_preferences (
+      user_id, email, email_enabled, daily_digest_time, timezone,
+      include_overdue, lookahead_days, include_undated_open, weekend_delivery, holiday_delivery, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(user_id) DO UPDATE SET
+      email = excluded.email,
+      email_enabled = excluded.email_enabled,
+      daily_digest_time = excluded.daily_digest_time,
+      timezone = excluded.timezone,
+      include_overdue = excluded.include_overdue,
+      lookahead_days = excluded.lookahead_days,
+      include_undated_open = excluded.include_undated_open,
+      weekend_delivery = excluded.weekend_delivery,
+      holiday_delivery = excluded.holiday_delivery,
+      updated_at = CURRENT_TIMESTAMP
+  `).bind(user.id, email || null, email_enabled ? 1 : 0, daily_digest_time, timezone,
+    include_overdue, lookahead_days, include_undated_open, weekend_delivery, holiday_delivery).run();
+
+  return c.json({ success: true, senderConfigured: isEmailSenderConfigured(c.env) });
 });
 
 app.post('/api/auth/login', async (c) => {
@@ -1881,4 +2318,11 @@ app.delete('/api/tasks/:id', async (c) => {
   return c.json({ success: true });
 });
 
-export default app;
+export default {
+  fetch: (request, env, executionContext) => app.fetch(request, env, executionContext),
+  async scheduled(controller, env) {
+    const scheduledAt = Number(controller?.scheduledTime) || Date.now();
+    const stats = await runDailyDigestSchedule(env, new Date(scheduledAt));
+    console.log('Daily digest schedule completed:', JSON.stringify(stats));
+  }
+};
