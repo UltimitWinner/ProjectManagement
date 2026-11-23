@@ -194,12 +194,13 @@ function repeatOccurrence(task, occurrenceDate) {
   };
 }
 
-export function getNextTaskOccurrence(task, fromDate = localDateValue(new Date()), excludedDates = []) {
+export function getNextTaskOccurrence(task, fromDate = localDateValue(new Date()), excludedDates = [], excludedWeekdays = []) {
   if (!task?.repeat_frequency) return task;
   const anchor = task.start_date || task.due_date;
   const anchorDate = utcDateFromString(anchor);
   if (!anchorDate) return task;
   const excluded = excludedDates instanceof Set ? excludedDates : new Set(excludedDates);
+  const excludedDays = new Set([...excludedWeekdays].map(Number));
   const targetDate = utcDateFromString(fromDate);
   let index = 0;
   if (targetDate && targetDate > anchorDate) {
@@ -221,18 +222,22 @@ export function getNextTaskOccurrence(task, fromDate = localDateValue(new Date()
   // rule such as the 31st even when an intervening month has fewer days.
   for (let count = index; count < 20000 && date && date <= (task.repeat_until || '9999-12-31'); count += 1) {
     last = date;
-    if (date >= fromDate && !excluded.has(date)) return { ...repeatOccurrence(task, date), id: task.id };
+    const weekday = utcDateFromString(date)?.getUTCDay();
+    if (date >= fromDate && !excluded.has(date) && !excludedDays.has(weekday)) {
+      return { ...repeatOccurrence(task, date), id: task.id };
+    }
     const next = repeatDateAt(anchor, task.repeat_frequency, task.repeat_interval, count + 1);
     if (!next || next <= date) break;
     date = next;
   }
-  if (excluded.size) return null;
+  if (excluded.size || excludedDays.size) return null;
   if (!last) return null;
   return { ...repeatOccurrence(task, last), id: task.id };
 }
 
-export function expandRecurringTasks(tasks, holidays = []) {
+export function expandRecurringTasks(tasks, holidays = [], excludedWeekdays = []) {
   const holidaySet = holidays instanceof Set ? holidays : new Set(holidays);
+  const excludedDays = new Set([...excludedWeekdays].map(Number));
   const expanded = [];
   for (const task of tasks) {
     if (!task.repeat_frequency || !task.repeat_until) {
@@ -243,8 +248,9 @@ export function expandRecurringTasks(tasks, holidays = []) {
     if (!utcDateFromString(anchor)) continue;
     let date = anchor;
     for (let count = 0; count < 20000 && date <= task.repeat_until; count += 1) {
-      // The project holiday rule is based on the task's scheduled start date.
-      if (!holidaySet.has(date)) expanded.push(repeatOccurrence(task, date));
+      // Project non-working weekdays and holidays are based on the scheduled start date.
+      const weekday = utcDateFromString(date)?.getUTCDay();
+      if (!holidaySet.has(date) && !excludedDays.has(weekday)) expanded.push(repeatOccurrence(task, date));
       const next = repeatDateAt(anchor, task.repeat_frequency, task.repeat_interval, count + 1);
       if (!next || next <= date) break;
       date = next;

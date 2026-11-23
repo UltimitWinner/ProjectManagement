@@ -2564,7 +2564,7 @@ function createTaskTreeRow(task) {
 
   const gradeText = taskGradeScoreMarkup(task);
   const taskIsGraded = isFolderGraded(task.folder_id);
-  const displayTask = getNextTaskOccurrence(task);
+  const displayTask = getProjectNextTaskOccurrence(task) || task;
 
   // Build custom field chips for fields that have a value on this task
   const cfChips = taskCustomFieldEntries(task, customFields)
@@ -2718,7 +2718,7 @@ function renderBoardView() {
     });
 
     filtered.forEach(task => {
-      const displayTask = getNextTaskOccurrence(task);
+      const displayTask = getProjectNextTaskOccurrence(task) || task;
       const card = document.createElement('div');
       card.className = 'task-card';
       card.dataset.taskId = task.id;
@@ -2782,7 +2782,9 @@ function renderBoardView() {
 function sortedTasks() {
   // Pass only the task. Array.map otherwise supplies the row index as the
   // second argument, which getNextTaskOccurrence interprets as fromDate.
-  return sortTasks(excludeDoneTasks(tasks, excludeDoneFromList).map(task => getNextTaskOccurrence(task)), folders, listSortState, projectStatusOptions());
+  return sortTasks(excludeDoneTasks(tasks, excludeDoneFromList)
+    .map(task => getProjectNextTaskOccurrence(task))
+    .filter(Boolean), folders, listSortState, projectStatusOptions());
 }
 
 function setExcludeDoneFilter(enabled) {
@@ -2873,7 +2875,7 @@ function renderListView() {
 
   tbody.innerHTML = '';
   visibleTasks.forEach(task => {
-    const displayTask = getNextTaskOccurrence(task);
+    const displayTask = getProjectNextTaskOccurrence(task);
     const tr = document.createElement('tr');
     tr.dataset.taskId = task.id;
     tr.draggable = hasProjectEditAccess();
@@ -2972,6 +2974,12 @@ function formatTaskDateAndTime(date, time) {
   return date ? `${date}${time ? ` ${time}` : ''}` : '-';
 }
 
+function getProjectNextTaskOccurrence(task, fromDate) {
+  const holidays = parseJsonArray(currentProject?.holidays_json, []);
+  const nonWorkingDays = parseJsonArray(currentProject?.non_working_days_json, [0, 6]).map(Number);
+  return getNextTaskOccurrence(task, fromDate, holidays, nonWorkingDays);
+}
+
 function renderGanttView() {
   const sidebar = document.getElementById('ganttSidebarCol');
   const header = document.getElementById('ganttTimelineHeader');
@@ -2982,9 +2990,11 @@ function renderGanttView() {
   const yScale = preferences.rowHeight / 42;
   viewport.style.setProperty('--gantt-y-scale', String(yScale));
   const projectHolidays = new Set(parseJsonArray(currentProject?.holidays_json, []));
+  const projectNonWorkingDays = parseJsonArray(currentProject?.non_working_days_json, [0, 6]).map(Number);
   const ganttTasks = expandRecurringTasks(
     sortTasks(excludeDoneTasks(tasks, excludeDoneFromList), folders, listSortState, projectStatusOptions()),
-    projectHolidays
+    projectHolidays,
+    projectNonWorkingDays
   );
   const storedGanttRows = buildGanttRows(ganttTasks, folders);
   const collapsedFolders = new Set(preferences.collapsedFolders);

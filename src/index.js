@@ -277,7 +277,7 @@ async function collectDailyDigest(db, user, preferences, localDate) {
         occurrenceFromDate = nextDueCandidate.toISOString().slice(0, 10);
       }
     }
-    const occurrence = isRepeating ? getNextTaskOccurrence(task, occurrenceFromDate, holidays) : task;
+    const occurrence = isRepeating ? getNextTaskOccurrence(task, occurrenceFromDate, holidays, nonWorkingDays) : task;
     if (!occurrence) continue;
     const dueDate = occurrence.due_date || occurrence.start_date;
     const taskInfo = projectInfo.get(projectId);
