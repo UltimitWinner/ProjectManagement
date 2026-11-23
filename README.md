@@ -66,6 +66,12 @@ For production, set `GMAIL_ADDRESS` and `GMAIL_APP_PASSWORD` as Worker secrets (
 
 Gmail personal accounts have sending quotas and may pause sending if usage looks unusual. This setup uses Gmail's own sender account; keep the daily digest volume within Google's current limits.
 
+Digest preferences can override the general due-date window, overdue and undated-task inclusion, and weekend or holiday delivery for each accessible project. Projects can also be excluded from a user's digest.
+
+## Project access
+
+Any signed-in user can create a project, including users who currently have only viewer or no access to other projects. A new project grants creator access only to its creator; everyone else starts with no access. Creators can add existing users and manage viewer or editor access. Only system administrators can change creator access.
+
 ## Canvas LMS import
 
 Canvas API token imports are temporarily disabled because the current Canvas instance denied access to the current-user API with HTTP 403. No Canvas developer key or token configuration is needed for HTML imports.

@@ -2112,6 +2112,66 @@ textarea:focus {
   color: var(--text-muted);
 }
 
+.project-digest-preferences {
+  min-width: 0;
+  margin: 1rem 0;
+  padding: 0.9rem;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+}
+
+.project-digest-preferences legend {
+  padding: 0 0.4rem;
+  color: var(--text-primary);
+  font-weight: 650;
+}
+
+.project-digest-settings-list {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.project-digest-setting {
+  min-width: 0;
+  padding: 0.85rem;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--surface-highlight);
+}
+
+.project-digest-include-label {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin-bottom: 0.7rem;
+  cursor: pointer;
+}
+
+.project-digest-include-label span {
+  color: var(--text-muted);
+  font-size: 0.88rem;
+}
+
+.project-digest-overrides {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem 0.8rem;
+}
+
+.project-digest-overrides label {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.3rem;
+  color: var(--text-soft);
+  font-size: 0.84rem;
+}
+
+.project-digest-overrides select {
+  width: 100%;
+  min-width: 0;
+}
+
 .custom-fields-section {
   border-top: 1px solid var(--border-color);
   padding-top: 1rem;
@@ -2286,5 +2346,9 @@ textarea:focus {
   #emailDigestFields .form-row {
     grid-template-columns: 1fr;
     gap: 0;
+  }
+
+  .project-digest-overrides {
+    grid-template-columns: 1fr;
   }
 }

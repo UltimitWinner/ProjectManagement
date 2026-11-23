@@ -177,28 +177,33 @@ function emailDate(dateValue, options = { weekday: 'short', month: 'short', day:
 
 async function collectDailyDigest(db, user, preferences, localDate) {
   const userId = user.id || user.user_id;
-  const lookaheadDays = Number.isInteger(Number(preferences.lookahead_days))
+  const defaultLookaheadDays = Number.isInteger(Number(preferences.lookahead_days))
     ? Math.min(30, Math.max(0, Number(preferences.lookahead_days))) : 7;
-  const throughDate = new Date(`${localDate}T00:00:00.000Z`);
-  throughDate.setUTCDate(throughDate.getUTCDate() + lookaheadDays);
-  const lastIncludedDate = throughDate.toISOString().slice(0, 10);
   const { results } = await db.prepare(`
     SELECT t.*, p.id AS calendar_project_id, p.name AS project_name,
-      p.holidays_json, p.non_working_days_json, f.name AS folder_name
+      p.holidays_json, p.non_working_days_json, f.name AS folder_name,
+      COALESCE(dpe.include_project, 1) AS digest_include_project,
+      dpe.include_overdue AS project_include_overdue,
+      dpe.lookahead_days AS project_lookahead_days,
+      dpe.include_undated_open AS project_include_undated_open,
+      dpe.weekend_delivery AS project_weekend_delivery,
+      dpe.holiday_delivery AS project_holiday_delivery
     FROM projects p
-    LEFT JOIN tasks t ON t.project_id = p.id AND (
+    LEFT JOIN user_project_email_preferences dpe
+      ON dpe.project_id = p.id AND dpe.user_id = ?
+    LEFT JOIN tasks t ON t.project_id = p.id AND COALESCE(dpe.include_project, 1) = 1 AND (
       (
         t.repeat_frequency IS NOT NULL AND t.repeat_frequency != ''
-        AND COALESCE(NULLIF(t.start_date, ''), NULLIF(t.due_date, '')) <= ?
+        AND COALESCE(NULLIF(t.start_date, ''), NULLIF(t.due_date, '')) <= date(?, '+' || COALESCE(dpe.lookahead_days, ?) || ' days')
         AND (t.repeat_until IS NULL OR t.repeat_until >= ?)
       )
       OR (
         t.status != 'done'
         AND (
           (COALESCE(NULLIF(t.due_date, ''), NULLIF(t.start_date, '')) IS NOT NULL
-            AND COALESCE(NULLIF(t.due_date, ''), NULLIF(t.start_date, '')) <= ?
-            AND (? = 1 OR COALESCE(NULLIF(t.due_date, ''), NULLIF(t.start_date, '')) >= ?))
-          OR (? = 1 AND NULLIF(t.due_date, '') IS NULL AND NULLIF(t.start_date, '') IS NULL)
+            AND COALESCE(NULLIF(t.due_date, ''), NULLIF(t.start_date, '')) <= date(?, '+' || COALESCE(dpe.lookahead_days, ?) || ' days')
+            AND (COALESCE(dpe.include_overdue, ?) = 1 OR COALESCE(NULLIF(t.due_date, ''), NULLIF(t.start_date, '')) >= ?))
+          OR (COALESCE(dpe.include_undated_open, ?) = 1 AND NULLIF(t.due_date, '') IS NULL AND NULLIF(t.start_date, '') IS NULL)
         )
       )
     )
@@ -215,14 +220,26 @@ async function collectDailyDigest(db, user, preferences, localDate) {
         )
       )
     )
-  `).bind(lastIncludedDate, localDate, lastIncludedDate, preferences.include_overdue ? 1 : 0,
-    localDate, preferences.include_undated_open ? 1 : 0,
+  `).bind(userId, localDate, defaultLookaheadDays, localDate,
+    localDate, defaultLookaheadDays, preferences.include_overdue ? 1 : 0, localDate,
+    preferences.include_undated_open ? 1 : 0,
     userId, user.system_role || 'user', userId).all();
 
-  const groups = { overdue: [], dueToday: [], upcoming: [], undated: [], lookaheadDays, suppressEmpty: false };
+  const groups = { overdue: [], dueToday: [], upcoming: [], undated: [], lookaheadDays: defaultLookaheadDays, suppressEmpty: false };
   const projectInfo = new Map();
   for (const task of results || []) {
     const projectId = task.calendar_project_id;
+    if (Number(task.digest_include_project) === 0) {
+      groups.suppressEmpty = true;
+      continue;
+    }
+    const projectLookaheadDays = task.project_lookahead_days === null || task.project_lookahead_days === undefined
+      ? defaultLookaheadDays
+      : Math.min(30, Math.max(0, Number(task.project_lookahead_days) || 0));
+    const includeOverdue = task.project_include_overdue === null || task.project_include_overdue === undefined
+      ? Boolean(preferences.include_overdue) : Number(task.project_include_overdue) === 1;
+    const includeUndatedOpen = task.project_include_undated_open === null || task.project_include_undated_open === undefined
+      ? Boolean(preferences.include_undated_open) : Number(task.project_include_undated_open) === 1;
     let holidays = [];
     try { holidays = JSON.parse(task.holidays_json || '[]'); } catch { }
     holidays = normalizeHolidayDates(holidays, []);
@@ -236,9 +253,14 @@ async function collectDailyDigest(db, user, preferences, localDate) {
       projectInfo.set(projectId, {
         isWeekend: projectIsWeekend,
         isHoliday: projectIsHoliday,
+        lookaheadDays: projectLookaheadDays,
+        includeOverdue,
+        weekendDelivery: task.project_weekend_delivery || preferences.weekend_delivery || 'always',
+        holidayDelivery: task.project_holiday_delivery || preferences.holiday_delivery || 'always',
         dueTodayCount: 0,
         items: []
       });
+      groups.lookaheadDays = Math.max(groups.lookaheadDays, projectLookaheadDays);
     }
     if (!task.id) continue;
 
@@ -260,7 +282,7 @@ async function collectDailyDigest(db, user, preferences, localDate) {
     const dueDate = occurrence.due_date || occurrence.start_date;
     const taskInfo = projectInfo.get(projectId);
     if (!dueDate) {
-      if (!isRepeating && preferences.include_undated_open && task.status !== 'done') {
+      if (!isRepeating && includeUndatedOpen && task.status !== 'done') {
         const item = {
           title: task.title,
           project: task.project_name,
@@ -292,16 +314,16 @@ async function collectDailyDigest(db, user, preferences, localDate) {
     };
 
     if (daysAhead === 0) taskInfo.dueTodayCount += 1;
-    if (daysAhead < 0 && preferences.include_overdue) groups.overdue.push(item);
+    if (daysAhead < 0 && includeOverdue) groups.overdue.push(item);
     else if (daysAhead === 0) groups.dueToday.push(item);
-    else if (daysAhead > 0 && daysAhead <= lookaheadDays) groups.upcoming.push(item);
-    if (daysAhead < 0 ? preferences.include_overdue : daysAhead <= lookaheadDays) taskInfo.items.push(item);
+    else if (daysAhead > 0 && daysAhead <= taskInfo.lookaheadDays) groups.upcoming.push(item);
+    if (daysAhead < 0 ? includeOverdue : daysAhead <= taskInfo.lookaheadDays) taskInfo.items.push(item);
   }
 
   const projectModes = project => {
     const modes = [];
-    if (project.isWeekend) modes.push(preferences.weekend_delivery || 'always');
-    if (project.isHoliday) modes.push(preferences.holiday_delivery || 'always');
+    if (project.isWeekend) modes.push(project.weekendDelivery);
+    if (project.isHoliday) modes.push(project.holidayDelivery);
     return modes;
   };
   const excludedProjects = new Set();
@@ -556,10 +578,25 @@ async function initializeTables(db) {
       FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
     )`),
     db.prepare('CREATE INDEX IF NOT EXISTS idx_user_email_preferences_enabled ON user_email_preferences(email_enabled, daily_digest_time)'),
+    db.prepare(`CREATE TABLE IF NOT EXISTS user_project_email_preferences (
+      user_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      include_project INTEGER NOT NULL DEFAULT 1,
+      include_overdue INTEGER DEFAULT NULL,
+      lookahead_days INTEGER DEFAULT NULL,
+      include_undated_open INTEGER DEFAULT NULL,
+      weekend_delivery TEXT DEFAULT NULL,
+      holiday_delivery TEXT DEFAULT NULL,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY(user_id, project_id),
+      FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+    )`),
+    db.prepare('CREATE INDEX IF NOT EXISTS idx_user_project_email_preferences_project ON user_project_email_preferences(project_id, user_id)'),
     db.prepare(`CREATE TABLE IF NOT EXISTS project_members (
       project_id TEXT NOT NULL,
       user_id TEXT NOT NULL,
-      access_level TEXT NOT NULL DEFAULT 'edit',
+      access_level TEXT NOT NULL DEFAULT 'none',
       PRIMARY KEY(project_id, user_id),
       FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
       FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -807,7 +844,7 @@ async function getProjectAccessLevel(db, projectId, user) {
 
 function verifyProjectPermission(accessLevel, minRequired = 'view') {
   if (accessLevel === 'none') return false;
-  if (minRequired === 'edit' && accessLevel !== 'edit') return false;
+  if (minRequired === 'edit' && !['edit', 'creator'].includes(accessLevel)) return false;
   return true;
 }
 
@@ -1202,6 +1239,25 @@ app.get('/api/notifications/preferences', async (c) => {
   if (!user) return c.json({ error: 'Authentication required' }, 401);
 
   const row = await c.env.DB.prepare('SELECT * FROM user_email_preferences WHERE user_id = ?').bind(user.id).first();
+  const { results: projectPreferences } = await c.env.DB.prepare(`
+    SELECT p.id AS project_id, p.name AS project_name,
+      COALESCE(dpe.include_project, 1) AS include_project,
+      dpe.include_overdue, dpe.lookahead_days, dpe.include_undated_open,
+      dpe.weekend_delivery, dpe.holiday_delivery
+    FROM projects p
+    LEFT JOIN user_project_email_preferences dpe
+      ON dpe.project_id = p.id AND dpe.user_id = ?
+    WHERE EXISTS (
+      SELECT 1 FROM project_members pm
+      WHERE pm.project_id = p.id AND pm.user_id = ? AND pm.access_level != 'none'
+    ) OR (
+      ? = 'admin' AND NOT EXISTS (
+        SELECT 1 FROM project_members admin_pm
+        WHERE admin_pm.project_id = p.id AND admin_pm.user_id = ? AND admin_pm.access_level = 'none'
+      )
+    )
+    ORDER BY p.name COLLATE NOCASE ASC
+  `).bind(user.id, user.id, user.systemRole || 'user', user.id).all();
   return c.json({
     hasSaved: Boolean(row),
     senderConfigured: isEmailSenderConfigured(c.env),
@@ -1219,7 +1275,17 @@ app.get('/api/notifications/preferences', async (c) => {
       email: '', email_enabled: false, daily_digest_time: '08:00', timezone: 'UTC',
       include_overdue: true, lookahead_days: 7, include_undated_open: false,
       weekend_delivery: 'always', holiday_delivery: 'always'
-    }
+    },
+    project_preferences: (projectPreferences || []).map(project => ({
+      project_id: project.project_id,
+      project_name: project.project_name,
+      include_project: Number(project.include_project) !== 0,
+      include_overdue: project.include_overdue == null ? null : Number(project.include_overdue) === 1,
+      lookahead_days: project.lookahead_days == null ? null : Number(project.lookahead_days),
+      include_undated_open: project.include_undated_open == null ? null : Number(project.include_undated_open) === 1,
+      weekend_delivery: project.weekend_delivery || 'inherit',
+      holiday_delivery: project.holiday_delivery || 'inherit'
+    }))
   });
 });
 
@@ -1254,7 +1320,69 @@ app.put('/api/notifications/preferences', async (c) => {
     return c.json({ error: 'Choose valid weekend and holiday delivery options.' }, 400);
   }
 
-  await c.env.DB.prepare(`
+  let projectPreferences;
+  if (body.project_preferences !== undefined) {
+    if (!Array.isArray(body.project_preferences) || body.project_preferences.length > 500) {
+      return c.json({ error: 'Project email settings must be a list of at most 500 projects.' }, 400);
+    }
+    const { results: accessibleProjects } = await c.env.DB.prepare(`
+      SELECT p.id FROM projects p
+      WHERE EXISTS (
+        SELECT 1 FROM project_members pm
+        WHERE pm.project_id = p.id AND pm.user_id = ? AND pm.access_level != 'none'
+      ) OR (
+        ? = 'admin' AND NOT EXISTS (
+          SELECT 1 FROM project_members admin_pm
+          WHERE admin_pm.project_id = p.id AND admin_pm.user_id = ? AND admin_pm.access_level = 'none'
+        )
+      )
+    `).bind(user.id, user.systemRole || 'user', user.id).all();
+    const accessibleIds = new Set((accessibleProjects || []).map(project => project.id));
+    const seenProjectIds = new Set();
+    projectPreferences = [];
+    const nullableBoolean = value => {
+      if (value === null || value === undefined || value === 'inherit') return null;
+      if (value === true || value === 1 || value === 'true') return 1;
+      if (value === false || value === 0 || value === 'false') return 0;
+      return undefined;
+    };
+    for (const item of body.project_preferences) {
+      const projectId = typeof item?.project_id === 'string' ? item.project_id : '';
+      if (!projectId || !accessibleIds.has(projectId) || seenProjectIds.has(projectId)) {
+        return c.json({ error: 'Project settings contain an inaccessible or duplicate project.' }, 400);
+      }
+      seenProjectIds.add(projectId);
+      const includeProject = item.include_project === false || item.include_project === 0 || item.include_project === 'false' ? 0 : 1;
+      const includeOverdue = nullableBoolean(item.include_overdue);
+      const includeUndatedOpen = nullableBoolean(item.include_undated_open);
+      if (includeOverdue === undefined || includeUndatedOpen === undefined) {
+        return c.json({ error: 'Choose valid per-project task inclusion options.' }, 400);
+      }
+      let projectLookaheadDays = null;
+      if (item.lookahead_days !== null && item.lookahead_days !== undefined && item.lookahead_days !== '' && item.lookahead_days !== 'inherit') {
+        projectLookaheadDays = Number(item.lookahead_days);
+        if (!Number.isInteger(projectLookaheadDays) || projectLookaheadDays < 0 || projectLookaheadDays > 30) {
+          return c.json({ error: 'Per-project look-ahead must be from 0 to 30 days.' }, 400);
+        }
+      }
+      const projectWeekend = item.weekend_delivery || 'inherit';
+      const projectHoliday = item.holiday_delivery || 'inherit';
+      if (!['inherit', ...validDeliveryModes].includes(projectWeekend) || !['inherit', ...validDeliveryModes].includes(projectHoliday)) {
+        return c.json({ error: 'Choose valid per-project weekend and holiday delivery options.' }, 400);
+      }
+      projectPreferences.push({
+        projectId,
+        includeProject,
+        includeOverdue,
+        lookaheadDays: projectLookaheadDays,
+        includeUndatedOpen,
+        weekendDelivery: projectWeekend === 'inherit' ? null : projectWeekend,
+        holidayDelivery: projectHoliday === 'inherit' ? null : projectHoliday
+      });
+    }
+  }
+
+  const statements = [c.env.DB.prepare(`
     INSERT INTO user_email_preferences (
       user_id, email, email_enabled, daily_digest_time, timezone,
       include_overdue, lookahead_days, include_undated_open, weekend_delivery, holiday_delivery, updated_at
@@ -1271,7 +1399,20 @@ app.put('/api/notifications/preferences', async (c) => {
       holiday_delivery = excluded.holiday_delivery,
       updated_at = CURRENT_TIMESTAMP
   `).bind(user.id, email || null, email_enabled ? 1 : 0, daily_digest_time, timezone,
-    include_overdue, lookahead_days, include_undated_open, weekend_delivery, holiday_delivery).run();
+    include_overdue, lookahead_days, include_undated_open, weekend_delivery, holiday_delivery)];
+  if (projectPreferences) {
+    statements.push(c.env.DB.prepare('DELETE FROM user_project_email_preferences WHERE user_id = ?').bind(user.id));
+    for (const project of projectPreferences) {
+      statements.push(c.env.DB.prepare(`
+        INSERT INTO user_project_email_preferences (
+          user_id, project_id, include_project, include_overdue, lookahead_days,
+          include_undated_open, weekend_delivery, holiday_delivery, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      `).bind(user.id, project.projectId, project.includeProject, project.includeOverdue,
+        project.lookaheadDays, project.includeUndatedOpen, project.weekendDelivery, project.holidayDelivery));
+    }
+  }
+  await c.env.DB.batch(statements);
 
   return c.json({ success: true, senderConfigured: isEmailSenderConfigured(c.env) });
 });
@@ -1519,12 +1660,12 @@ app.get('/api/permission-projects', async (c) => {
   if (!user) return c.json({ error: 'Authentication required' }, 401);
 
   const query = user.systemRole === 'admin'
-    ? c.env.DB.prepare('SELECT id, name FROM projects ORDER BY name COLLATE NOCASE ASC')
+    ? c.env.DB.prepare("SELECT id, name, 'edit' AS user_access_level FROM projects ORDER BY name COLLATE NOCASE ASC")
     : c.env.DB.prepare(`
-      SELECT p.id, p.name
+      SELECT p.id, p.name, pm.access_level AS user_access_level
       FROM projects p
       JOIN project_members pm ON pm.project_id = p.id
-      WHERE pm.user_id = ? AND pm.access_level = 'edit'
+      WHERE pm.user_id = ? AND pm.access_level IN ('edit', 'creator')
       ORDER BY p.name COLLATE NOCASE ASC
     `).bind(user.id);
   const { results } = await query.all();
@@ -1553,10 +1694,10 @@ app.post('/api/projects', async (c) => {
   await db.batch([
     db.prepare('INSERT INTO projects (id, name, description, color, default_view, non_working_days_json, holidays_json, status_options_json, graded) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
       .bind(id, name, description, color, default_view, JSON.stringify(nonWorkingDays), JSON.stringify(holidays), JSON.stringify(statusOptions), graded),
-    db.prepare('INSERT INTO project_members (project_id, user_id, access_level) VALUES (?, ?, ?)').bind(id, user.id, 'edit')
+    db.prepare('INSERT INTO project_members (project_id, user_id, access_level) VALUES (?, ?, ?)').bind(id, user.id, 'creator')
   ]);
 
-  return c.json({ id, name, description, color, default_view, graded, non_working_days_json: JSON.stringify(nonWorkingDays), holidays_json: JSON.stringify(holidays), status_options_json: JSON.stringify(statusOptions), user_access_level: 'edit' }, 201);
+  return c.json({ id, name, description, color, default_view, graded, non_working_days_json: JSON.stringify(nonWorkingDays), holidays_json: JSON.stringify(holidays), status_options_json: JSON.stringify(statusOptions), user_access_level: 'creator' }, 201);
 });
 
 app.get('/api/projects/:id', async (c) => {
@@ -1652,7 +1793,7 @@ app.get('/api/projects/:id/members', async (c) => {
     name: u.name,
     systemRole: u.system_role || 'user',
     accessLevel: memberMap.get(u.id) || 'none'
-  })).filter(member => isAdmin || member.accessLevel !== 'none');
+  })).filter(member => isAdmin || access === 'creator' || member.accessLevel !== 'none');
 
   return c.json(response);
 });
@@ -1677,6 +1818,9 @@ app.post('/api/projects/:id/viewers', async (c) => {
   if (!isAdmin && target.system_role === 'admin') return c.json({ error: 'System administrators retain global edit access and cannot be managed as viewers.' }, 403);
 
   const current = await db.prepare('SELECT access_level FROM project_members WHERE project_id = ? AND user_id = ?').bind(projectId, target.id).first();
+  if (!isAdmin && current?.access_level === 'creator') {
+    return c.json({ error: 'Only a system administrator can change creator access.' }, 403);
+  }
   if (current?.access_level === 'edit') return c.json({ error: 'That user is already an editor. Editors cannot change editor access.' }, 403);
   if (current?.access_level === 'view') return c.json({ error: 'That user already has view access.' }, 409);
 
@@ -1686,6 +1830,42 @@ app.post('/api/projects/:id/viewers', async (c) => {
   `).bind(projectId, target.id).run();
 
   return c.json({ success: true, user: { userId: target.id, username: target.username, name: target.name, systemRole: target.system_role || 'user', accessLevel: 'view' } });
+});
+
+app.post('/api/projects/:id/members', async (c) => {
+  const user = await getAuthenticatedUser(c);
+  if (!user) return c.json({ error: 'Authentication required' }, 401);
+
+  const db = c.env.DB;
+  const projectId = c.req.param('id');
+  const isAdmin = user.systemRole === 'admin';
+  const projectAccess = await getProjectAccessLevel(db, projectId, user);
+  if (!isAdmin && projectAccess !== 'creator') return c.json({ error: 'Project creator access required' }, 403);
+  const project = await db.prepare('SELECT id FROM projects WHERE id = ?').bind(projectId).first();
+  if (!project) return c.json({ error: 'Project not found' }, 404);
+
+  const body = await c.req.json();
+  const username = sanitizeString(body.username || '', 80);
+  const accessLevel = body.access_level;
+  const allowedLevels = isAdmin ? ['none', 'view', 'edit', 'creator'] : ['none', 'view', 'edit'];
+  if (!username) return c.json({ error: 'Enter a username.' }, 400);
+  if (!allowedLevels.includes(accessLevel)) return c.json({ error: 'Choose a valid project access level.' }, 400);
+
+  const target = await db.prepare('SELECT id, username, name, system_role FROM users WHERE username = ? COLLATE NOCASE').bind(username).first();
+  if (!target) return c.json({ error: 'No account exists with that username.' }, 404);
+  if (!isAdmin && target.system_role === 'admin') {
+    return c.json({ error: 'System administrators retain global access and cannot be managed by a project creator.' }, 403);
+  }
+  const current = await db.prepare('SELECT access_level FROM project_members WHERE project_id = ? AND user_id = ?').bind(projectId, target.id).first();
+  if (!isAdmin && current?.access_level === 'creator') {
+    return c.json({ error: 'Only a system administrator can change creator access.' }, 403);
+  }
+
+  await db.prepare(`
+    INSERT INTO project_members (project_id, user_id, access_level) VALUES (?, ?, ?)
+    ON CONFLICT(project_id, user_id) DO UPDATE SET access_level = excluded.access_level
+  `).bind(projectId, target.id, accessLevel).run();
+  return c.json({ success: true, projectId, user: { userId: target.id, username: target.username, name: target.name }, access_level: accessLevel });
 });
 
 app.put('/api/projects/:id/members/:userId', async (c) => {
@@ -1703,15 +1883,20 @@ app.put('/api/projects/:id/members/:userId', async (c) => {
   if (!target) return c.json({ error: 'User not found' }, 404);
 
   const { access_level } = await c.req.json();
-  if (!['none', 'view', 'edit'].includes(access_level)) {
-    return c.json({ error: 'Invalid access level. Must be none, view, or edit.' }, 400);
+  if (!['none', 'view', 'edit', 'creator'].includes(access_level)) {
+    return c.json({ error: 'Invalid access level. Must be none, view, edit, or creator.' }, 400);
   }
 
   if (!isAdmin) {
     const projectAccess = await getProjectAccessLevel(db, projectId, user);
     if (!verifyProjectPermission(projectAccess, 'edit')) return c.json({ error: 'Project edit access required' }, 403);
     const current = await db.prepare('SELECT access_level FROM project_members WHERE project_id = ? AND user_id = ?').bind(projectId, targetUserId).first();
-    if (target.system_role === 'admin' || current?.access_level !== 'view' || access_level !== 'none') {
+    if (target.system_role === 'admin' || current?.access_level === 'creator') {
+      return c.json({ error: 'Only a system administrator can change system administrator or creator access.' }, 403);
+    }
+    if (projectAccess === 'creator') {
+      if (access_level === 'creator') return c.json({ error: 'Only a system administrator can assign creator access.' }, 403);
+    } else if (current?.access_level !== 'view' || access_level !== 'none') {
       return c.json({ error: 'Editors may only remove view access from existing viewers.' }, 403);
     }
   }

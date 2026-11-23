@@ -134,6 +134,11 @@
               </select>
             </div>
           </div>
+          <fieldset class="project-digest-preferences">
+            <legend>Per-project digest settings</legend>
+            <p class="form-hint">Choose which projects appear and override task or calendar rules for individual projects. “Use general setting” follows the options above.</p>
+            <div id="projectDigestSettingsList" class="project-digest-settings-list"></div>
+          </fieldset>
           <p class="form-hint">Weekend rules use each project’s non-working weekdays, and holiday rules use that project’s holiday calendar. Rules apply per project. “Only if the digest has tasks” includes future tasks such as one due tomorrow. Completed one-time tasks are omitted; repeating tasks show their next non-overdue occurrence.</p>
         </div>
         <p id="emailSenderStatus" class="form-hint" role="status"></p>
@@ -931,16 +936,21 @@
           <button type="submit" class="btn-primary">Add user</button>
         </form>
         <form id="addViewerForm" class="member-create-form hidden">
-          <h3>Add viewer</h3>
+          <h3 id="addMemberHeading">Add project member</h3>
           <div class="form-row">
             <div class="form-group">
               <label for="addViewerUsername">Username</label>
               <input id="addViewerUsername" type="text" maxlength="80" autocomplete="off" required>
             </div>
-            <div class="form-group" style="justify-content:flex-end;">
-              <button type="submit" class="btn-primary">Grant view access</button>
+            <div id="addMemberAccessGroup" class="form-group hidden">
+              <label for="addMemberAccessLevel">Access level</label>
+              <select id="addMemberAccessLevel">
+                <option value="view">Viewer</option>
+                <option value="edit">Editor</option>
+              </select>
             </div>
           </div>
+          <button id="addMemberSubmit" type="submit" class="btn-primary">Grant view access</button>
         </form>
         <div class="table-responsive">
           <table class="user-table">

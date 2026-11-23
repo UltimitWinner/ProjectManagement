@@ -5,7 +5,7 @@ import { canvasCourseToBackup, canvasCourseLabel, parseCanvasAssignmentsHtml, de
 
 // State
 let currentUser = null; // { id, username, name, systemRole }
-let currentProjectAccess = 'none'; // 'none', 'view', 'edit' for the currently selected project
+let currentProjectAccess = 'none'; // 'none', 'view', 'edit', or 'creator' for the current project
 let projects = [];
 let currentProjectId = new URLSearchParams(location.search).get('canvas_project') || null;
 let currentProject = null;
@@ -26,6 +26,10 @@ let lastBoardDropAt = 0;
 let lastGanttDropAt = 0;
 let lastListDropAt = 0;
 let projectHolidayDraft = [];
+function hasProjectEditAccess(accessLevel = currentProjectAccess) {
+  return accessLevel === 'edit' || accessLevel === 'creator';
+}
+
 let pendingImport = null;
 let exportSelectedOnly = false;
 let canvasCourses = [];
@@ -303,6 +307,69 @@ function updateEmailPreferenceVisibility() {
   digestControls.forEach(input => { input.required = enabled && input.id === 'digestLookaheadDays'; });
   [email, time, timezone, ...digestControls]
     .forEach(input => { input.disabled = !enabled; });
+  document.querySelectorAll('.project-digest-setting').forEach(row => {
+    const includeProject = row.querySelector('.project-digest-include');
+    includeProject.disabled = !enabled;
+    row.querySelectorAll('.project-digest-override').forEach(input => {
+      input.disabled = !enabled || !includeProject.checked;
+    });
+  });
+}
+
+function renderProjectDigestSettings(projectPreferences, preferences) {
+  const container = document.getElementById('projectDigestSettingsList');
+  if (!projectPreferences?.length) {
+    container.innerHTML = '<p class="form-hint">No accessible projects to configure yet.</p>';
+    return;
+  }
+  const options = [
+    ['always', 'Send every day'],
+    ['never', 'Never send on this day'],
+    ['due_today', 'Only if a digest task is due today'],
+    ['if_content', 'Only if this project has digest tasks']
+  ];
+  const modeLabel = value => options.find(([mode]) => mode === value)?.[1] || 'Send every day';
+  container.innerHTML = projectPreferences.map(project => {
+    const label = escapeHtml(project.project_name);
+    const id = escapeHtml(project.project_id);
+    const lookaheadOptions = [`<option value="inherit">Use general setting (${Number(preferences.lookahead_days ?? 7)} days)</option>`];
+    for (let days = 0; days <= 30; days += 1) {
+      lookaheadOptions.push(`<option value="${days}" ${project.lookahead_days === days ? 'selected' : ''}>${days} day${days === 1 ? '' : 's'}</option>`);
+    }
+    const booleanOptions = (field, generalValue, includeLabel) => `
+      <option value="inherit">Use general setting (${generalValue ? 'included' : 'excluded'})</option>
+      <option value="include" ${project[field] === true ? 'selected' : ''}>${includeLabel}</option>
+      <option value="exclude" ${project[field] === false ? 'selected' : ''}>Exclude</option>`;
+    const deliveryOptions = (field, generalMode) => `
+      <option value="inherit">Use general setting (${escapeHtml(modeLabel(generalMode))})</option>
+      ${options.map(([mode, text]) => `<option value="${mode}" ${project[field] === mode ? 'selected' : ''}>${text}</option>`).join('')}`;
+    return `
+      <section class="project-digest-setting" data-project-id="${id}">
+        <label class="project-digest-include-label">
+          <input class="project-digest-include" type="checkbox" ${project.include_project ? 'checked' : ''}>
+          <strong>${label}</strong>
+          <span>Include in digest</span>
+        </label>
+        <div class="project-digest-overrides">
+          <label>Due-date window
+            <select class="project-digest-override project-digest-lookahead">${lookaheadOptions.join('')}</select>
+          </label>
+          <label>Overdue tasks
+            <select class="project-digest-override project-digest-overdue">${booleanOptions('include_overdue', preferences.include_overdue, 'Include')}</select>
+          </label>
+          <label>Undated open tasks
+            <select class="project-digest-override project-digest-undated">${booleanOptions('include_undated_open', preferences.include_undated_open, 'Include')}</select>
+          </label>
+          <label>Weekend delivery
+            <select class="project-digest-override project-digest-weekend">${deliveryOptions('weekend_delivery', preferences.weekend_delivery)}</select>
+          </label>
+          <label>Holiday delivery
+            <select class="project-digest-override project-digest-holiday">${deliveryOptions('holiday_delivery', preferences.holiday_delivery)}</select>
+          </label>
+        </div>
+      </section>`;
+  }).join('');
+  container.querySelectorAll('.project-digest-include').forEach(input => input.addEventListener('change', updateEmailPreferenceVisibility));
 }
 
 async function openEmailPreferencesModal() {
@@ -322,6 +389,7 @@ async function openEmailPreferencesModal() {
     document.getElementById('digestUndatedOpen').checked = Boolean(preferences.include_undated_open);
     document.getElementById('digestWeekendDelivery').value = preferences.weekend_delivery || 'always';
     document.getElementById('digestHolidayDelivery').value = preferences.holiday_delivery || 'always';
+    renderProjectDigestSettings(result.project_preferences || [], preferences);
     document.getElementById('emailSenderStatus').textContent = result.senderConfigured
       ? 'Email delivery is configured.'
       : 'Your preferences can be saved now. Email delivery will begin after the email provider is configured for this Worker.';
@@ -345,7 +413,19 @@ async function handleSaveEmailPreferences(event) {
     lookahead_days: Number(document.getElementById('digestLookaheadDays').value),
     include_undated_open: document.getElementById('digestUndatedOpen').checked,
     weekend_delivery: document.getElementById('digestWeekendDelivery').value,
-    holiday_delivery: document.getElementById('digestHolidayDelivery').value
+    holiday_delivery: document.getElementById('digestHolidayDelivery').value,
+    project_preferences: Array.from(document.querySelectorAll('.project-digest-setting')).map(row => ({
+      project_id: row.dataset.projectId,
+      include_project: row.querySelector('.project-digest-include').checked,
+      lookahead_days: row.querySelector('.project-digest-lookahead').value === 'inherit'
+        ? null : Number(row.querySelector('.project-digest-lookahead').value),
+      include_overdue: row.querySelector('.project-digest-overdue').value === 'inherit'
+        ? null : row.querySelector('.project-digest-overdue').value === 'include',
+      include_undated_open: row.querySelector('.project-digest-undated').value === 'inherit'
+        ? null : row.querySelector('.project-digest-undated').value === 'include',
+      weekend_delivery: row.querySelector('.project-digest-weekend').value,
+      holiday_delivery: row.querySelector('.project-digest-holiday').value
+    }))
   };
   try {
     const result = await api('/api/notifications/preferences', { method: 'PUT', body: JSON.stringify(payload) });
@@ -1173,8 +1253,10 @@ async function loadProjects() {
       currentProjectAccess = 'none';
       updateProjectPermissionsButton();
       currentProjectTitle.textContent = 'No Projects Available';
-      currentProjectDesc.textContent = 'There are no projects in your sidebar. Use Project Permissions to restore access or create a project.';
-      document.getElementById('restrictedMsg').textContent = 'No projects are currently available in your sidebar. System administrators can restore project access in Project Permissions.';
+      currentProjectDesc.textContent = 'There are no projects in your sidebar. Use + to create one or ask a project creator to grant you access.';
+      document.getElementById('restrictedMsg').textContent = currentUser.systemRole === 'admin'
+        ? 'No projects are currently visible. Use + to create a project or restore access in Project Permissions.'
+        : 'No projects are currently available. Use + to create a project or ask a project creator to grant you access.';
       tasks = [];
       folders = [];
       customFields = [];
@@ -1221,7 +1303,7 @@ async function selectProject(id) {
   // Update Access Badge
   projectAccessBadge.textContent = currentProjectAccess.toUpperCase();
   projectAccessBadge.className = 'badge';
-  if (currentProjectAccess === 'edit') {
+  if (hasProjectEditAccess()) {
     projectAccessBadge.classList.add('badge-success');
   } else if (currentProjectAccess === 'view') {
     projectAccessBadge.classList.add('badge-medium');
@@ -1230,7 +1312,7 @@ async function selectProject(id) {
   }
 
   // Enforce Project-Dependent Permissions in UI
-  const canEdit = currentProjectAccess === 'edit';
+  const canEdit = hasProjectEditAccess();
   const hasAccess = currentProjectAccess !== 'none';
   document.getElementById('btnDataTransfer').disabled = !hasAccess;
   updateProjectPermissionsButton();
@@ -1282,7 +1364,7 @@ async function selectProject(id) {
 
 function updateProjectPermissionsButton() {
   const canManage = currentUser?.systemRole === 'admin'
-    || projects.some(project => project.user_access_level === 'edit');
+    || projects.some(project => hasProjectEditAccess(project.user_access_level));
   btnManageMembers.classList.toggle('hidden', !canManage);
 }
 
@@ -2620,7 +2702,7 @@ function renderBoardView() {
       const card = document.createElement('div');
       card.className = 'task-card';
       card.dataset.taskId = task.id;
-      card.draggable = currentProjectAccess === 'edit';
+      card.draggable = hasProjectEditAccess();
 
       const folderPath = getFolderPath(task.folder_id, folders);
       const folderBadge = folderPath ? `<span class="badge badge-course">Folder: ${escapeHtml(folderPath)}</span>` : '';
@@ -2772,7 +2854,7 @@ function renderListView() {
     const displayTask = getNextTaskOccurrence(task);
     const tr = document.createElement('tr');
     tr.dataset.taskId = task.id;
-    tr.draggable = currentProjectAccess === 'edit';
+    tr.draggable = hasProjectEditAccess();
     applyTaskFolderColor(tr, task);
     const folderPath = getFolderPath(task.folder_id, folders);
     const taskIsGraded = isFolderGraded(task.folder_id);
@@ -3052,7 +3134,7 @@ function renderGanttView() {
     const sideCell = document.createElement('div');
     sideCell.className = 'gantt-sidebar-cell';
     sideCell.dataset.taskId = task.id;
-    sideCell.draggable = currentProjectAccess === 'edit' && !task.repeat_frequency;
+      sideCell.draggable = hasProjectEditAccess() && !task.repeat_frequency;
     sideCell.style.paddingLeft = `${Math.max(1, (12 + entry.depth * 12) * yScale)}px`;
     sideCell.style.paddingRight = `${Math.max(1, 16 * yScale)}px`;
     sideCell.style.height = `${rowHeight(entry)}px`;
@@ -3086,7 +3168,7 @@ function renderGanttView() {
       bar.className = 'gantt-bar-item';
       bar.dataset.taskId = task.id;
       bar.dataset.occurrenceDate = occurrence._recurrenceDate || '';
-      bar.draggable = currentProjectAccess === 'edit' && !task.repeat_frequency;
+      bar.draggable = hasProjectEditAccess() && !task.repeat_frequency;
       applyTaskFolderColor(bar, task);
       bar.style.color = readableTextColor(getTaskFolderColor(task) || getComputedStyle(document.documentElement).getPropertyValue('--accent-1').trim());
       bar.style.left = `${left}px`;
@@ -3253,7 +3335,7 @@ function openTaskModal(task = null, presetFolderId = '') {
   updateTaskGradeFieldVisibility();
 
   const btnDelete = document.getElementById('btnDeleteTask');
-  if (task && currentProjectAccess === 'edit') {
+  if (task && hasProjectEditAccess()) {
     btnDelete.classList.remove('hidden');
   } else {
     btnDelete.classList.add('hidden');
@@ -3594,18 +3676,25 @@ async function openMembersModal(projectIdOverride = currentProjectId) {
   projectSelect.value = selectedProjectId;
   const selectedProject = allProjects.find(project => project.id === selectedProjectId);
   const hasProject = Boolean(selectedProject);
+  const isCreator = !isAdmin && selectedProject?.user_access_level === 'creator';
   document.getElementById('membersModalHeading').textContent = hasProject
-    ? (isAdmin ? 'Project Access Permissions' : 'Project Viewers') : 'User Accounts';
+    ? (isAdmin ? 'Project Access Permissions' : isCreator ? 'Project Members' : 'Project Viewers') : 'User Accounts';
   document.getElementById('membersModalHelp').innerHTML = hasProject
     ? isAdmin
       ? 'Set each account’s access level. System administrators retain global edit access. Project: <strong id="membersProjectTitle"></strong>.'
       : 'Add viewers by username or remove existing viewer access. Accounts with no project access are not shown. Project: <strong id="membersProjectTitle"></strong>.'
     : 'Choose a project to manage its access, or add and manage user accounts.';
+  if (isCreator) {
+    document.getElementById('membersModalHelp').innerHTML = 'Add users and manage viewer or editor access. Only system administrators can change creator access. Project: <strong id="membersProjectTitle"></strong>.';
+  }
   if (hasProject) document.getElementById('membersProjectTitle').textContent = selectedProject.name;
   document.querySelectorAll('.project-access-column').forEach(cell => cell.classList.toggle('hidden', !hasProject));
   document.querySelectorAll('.system-role-column, .account-column').forEach(cell => cell.classList.toggle('hidden', !isAdmin));
   document.getElementById('newUserForm').classList.toggle('hidden', !isAdmin);
   document.getElementById('addViewerForm').classList.toggle('hidden', isAdmin || !hasProject);
+  document.getElementById('addMemberHeading').textContent = isCreator ? 'Add project member' : 'Add viewer';
+  document.getElementById('addMemberAccessGroup').classList.toggle('hidden', !isCreator);
+  document.getElementById('addMemberSubmit').textContent = isCreator ? 'Add member' : 'Grant view access';
   membersModal.classList.remove('hidden');
 
   try {
@@ -3626,22 +3715,34 @@ async function openMembersModal(projectIdOverride = currentProjectId) {
           </select>
         </td>
       ` : '<td class="system-role-column hidden"></td>';
+      const canManageMember = isAdmin || (isCreator && m.systemRole !== 'admin' && m.accessLevel !== 'creator');
+      const accessOptions = isAdmin ? `
+        <option value="creator" ${m.accessLevel === 'creator' ? 'selected' : ''}>Creator</option>
+        <option value="edit" ${m.accessLevel === 'edit' ? 'selected' : ''}>Edit (Full)</option>
+        <option value="view" ${m.accessLevel === 'view' ? 'selected' : ''}>View (Read-only)</option>
+        <option value="none" ${m.accessLevel === 'none' ? 'selected' : ''}>None (No access)</option>` : `
+        <option value="edit" ${m.accessLevel === 'edit' ? 'selected' : ''}>Edit (Full)</option>
+        <option value="view" ${m.accessLevel === 'view' ? 'selected' : ''}>View (Read-only)</option>
+        <option value="none" ${m.accessLevel === 'none' ? 'selected' : ''}>None (No access)</option>`;
+      const accessName = m.systemRole === 'admin' ? 'SYSTEM ADMIN' : (m.accessLevel || 'none').toUpperCase();
+      const accessBadgeClass = m.accessLevel === 'creator' ? 'badge-custom'
+        : m.accessLevel === 'edit' || m.systemRole === 'admin' ? 'badge-success'
+          : m.accessLevel === 'view' ? 'badge-medium' : 'badge-urgent';
+      const accessActionCell = canManageMember ? `
+        <select class="member-role-select" data-user-id="${escapeHtml(m.userId)}">
+          ${accessOptions}
+        </select>`
+        : m.accessLevel === 'creator' ? '<span class="form-hint">Only a system administrator can change creator access.</span>'
+          : m.accessLevel === 'view' && m.systemRole !== 'admin'
+            ? `<button class="btn-danger remove-viewer-button" type="button" data-user-id="${escapeHtml(m.userId)}">Remove viewer</button>`
+            : m.systemRole === 'admin' ? '<span class="form-hint">System administrator</span>'
+              : m.accessLevel === 'edit' ? '<span class="form-hint">Editor access</span>' : '<span class="form-hint">No project access</span>';
       const accessCell = hasProject ? `
         <td class="project-access-column">
-          <span class="badge ${m.accessLevel === 'edit' ? 'badge-success' : m.accessLevel === 'view' ? 'badge-medium' : 'badge-urgent'}">
-            ${(m.accessLevel || 'N/A').toUpperCase()}
-          </span>
+          <span class="badge ${accessBadgeClass}">${accessName}</span>
         </td>
         <td class="project-access-column">
-          ${isAdmin ? `
-            <select class="member-role-select" data-user-id="${escapeHtml(m.userId)}">
-              <option value="edit" ${m.accessLevel === 'edit' ? 'selected' : ''}>Edit (Full)</option>
-              <option value="view" ${m.accessLevel === 'view' ? 'selected' : ''}>View (Read-only)</option>
-              <option value="none" ${m.accessLevel === 'none' ? 'selected' : ''}>None (No access)</option>
-            </select>
-          ` : m.accessLevel === 'view' && m.systemRole !== 'admin' ? `
-            <button class="btn-danger remove-viewer-button" type="button" data-user-id="${escapeHtml(m.userId)}">Remove viewer</button>
-          ` : m.systemRole === 'admin' ? '<span class="form-hint">System administrator</span>' : '<span class="form-hint">Editor access</span>'}
+          ${accessActionCell}
         </td>
       ` : '<td class="project-access-column hidden"></td><td class="project-access-column hidden"></td>';
       const accountCell = isAdmin
@@ -3656,7 +3757,7 @@ async function openMembersModal(projectIdOverride = currentProjectId) {
       `;
 
       const memberRoleSelect = tr.querySelector('.member-role-select');
-      if (memberRoleSelect && isAdmin) memberRoleSelect.addEventListener('change', async (e) => {
+      if (memberRoleSelect) memberRoleSelect.addEventListener('change', async (e) => {
         const newAccess = e.target.value;
         try {
           await api(`/api/projects/${selectedProjectId}/members/${encodeURIComponent(m.userId)}`, {
@@ -3753,11 +3854,15 @@ async function handleAddViewer(event) {
   const projectId = document.getElementById('membersProjectSelect').value;
   const username = document.getElementById('addViewerUsername').value.trim();
   if (!projectId || !username) return;
+  const creatorAccess = !document.getElementById('addMemberAccessGroup').classList.contains('hidden');
+  const accessLevel = creatorAccess ? document.getElementById('addMemberAccessLevel').value : 'view';
   try {
-    await api(`/api/projects/${projectId}/viewers`, { method: 'POST', body: JSON.stringify({ username }) });
+    await api(creatorAccess ? `/api/projects/${projectId}/members` : `/api/projects/${projectId}/viewers`, {
+      method: 'POST', body: JSON.stringify({ username, access_level: accessLevel })
+    });
     await openMembersModal(projectId);
   } catch (err) {
-    alert('Failed to add viewer: ' + err.message);
+    alert('Failed to add project member: ' + err.message);
   }
 }
 
@@ -3803,6 +3908,8 @@ function addProjectHoliday() {
 }
 
 function openProjectModal(projectToEdit = null) {
+  const saveButton = projectForm.querySelector('button[type="submit"]');
+  saveButton.disabled = projectToEdit ? !hasProjectEditAccess() : false;
   const nonWorkingDays = parseJsonArray(projectToEdit?.non_working_days_json, [0, 6]).map(Number);
   document.querySelectorAll('.project-day-checkbox').forEach(input => {
     input.checked = nonWorkingDays.includes(Number(input.value));
