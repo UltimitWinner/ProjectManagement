@@ -389,7 +389,7 @@ function buildDailyDigestEmail(user, localDate, groups, appUrl = '') {
         <tr><td style="padding:16px 28px 0;"><table role="presentation" width="100%" cellspacing="0" cellpadding="0"><tr>
           <td style="padding:12px;background:#fff5f4;border-radius:9px;text-align:center;"><div style="font-size:20px;font-weight:700;color:#b42318;">${counts.overdue}</div><div style="font-size:11px;color:#667085;">OVERDUE</div></td><td width="8"></td>
           <td style="padding:12px;background:#fffaeb;border-radius:9px;text-align:center;"><div style="font-size:20px;font-weight:700;color:#b54708;">${counts.dueToday}</div><div style="font-size:11px;color:#667085;">DUE TODAY</div></td><td width="8"></td>
-          <td style="padding:12px;background:#eff8ff;border-radius:9px;text-align:center;"><div style="font-size:20px;font-weight:700;color:#176b87;">${counts.upcoming}</div><div style="font-size:11px;color:#667085;">${groups.lookaheadDays === 0 ? 'TODAY ONLY' : `NEXT ${groups.lookaheadDays} DAYS`}</div></td><td width="8"></td>
+          <td style="padding:12px;background:#eff8ff;border-radius:9px;text-align:center;"><div style="font-size:20px;font-weight:700;color:#176b87;">${counts.upcoming}</div><div style="font-size:11px;color:#667085;">${groups.lookaheadDays === 0 ? 'TODAY ONLY' : `NEXT ${groups.lookaheadDays} DAY${groups.lookaheadDays === 1 ? '' : 'S'}`}</div></td><td width="8"></td>
           <td style="padding:12px;background:#f4f3ff;border-radius:9px;text-align:center;"><div style="font-size:20px;font-weight:700;color:#6941c6;">${counts.undated}</div><div style="font-size:11px;color:#667085;">NO DATE</div></td>
         </tr></table></td></tr>
         ${sectionHtml || '<tr><td style="padding:30px 28px;text-align:center;color:#667085;font-size:14px;">You’re all caught up. No tasks match this digest.</td></tr>'}
@@ -399,7 +399,10 @@ function buildDailyDigestEmail(user, localDate, groups, appUrl = '') {
     </td></tr></table>
   </body></html>`;
   const textLines = [`MYPLAN DAILY DIGEST — ${dateLabel}`, `Hi ${user.name || user.username}, here’s what needs your attention.`, `${total} task${total === 1 ? '' : 's'} in this digest.`, ''];
-  for (const [key, heading] of [['overdue', 'OVERDUE'], ['dueToday', 'DUE TODAY'], ['upcoming', `COMING UP · NEXT ${groups.lookaheadDays} DAYS`], ['undated', 'OPEN · NO DATE SET']]) {
+  const upcomingTextHeading = groups.lookaheadDays === 0
+    ? 'COMING UP · TODAY ONLY'
+    : `COMING UP · NEXT ${groups.lookaheadDays} DAY${groups.lookaheadDays === 1 ? '' : 'S'}`;
+  for (const [key, heading] of [['overdue', 'OVERDUE'], ['dueToday', 'DUE TODAY'], ['upcoming', upcomingTextHeading], ['undated', 'OPEN · NO DATE SET']]) {
     if (!groups[key].length) continue;
     textLines.push(heading);
     for (const task of groups[key]) textLines.push(`• ${task.title} — ${task.project}${task.folder ? ` / ${task.folder}` : ''}${task.dueDate ? ` — ${task.dueDate}${task.dueTime ? ` ${task.dueTime}` : ''}` : ' — No date set'}${task.repeating ? ' — Repeating' : ''}`);

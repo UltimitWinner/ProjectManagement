@@ -514,6 +514,14 @@ body {
   gap: 0.6rem;
 }
 
+.topbar-more-actions {
+  display: contents;
+}
+
+.topbar-more-actions > summary {
+  display: none;
+}
+
 .data-transfer-body {
   display: grid;
   gap: 1rem;
@@ -2350,5 +2358,153 @@ textarea:focus {
 
   .project-digest-overrides {
     grid-template-columns: 1fr;
+  }
+}
+
+/* Keep the project workspace visible on phones. */
+@media (max-width: 760px) {
+  .sidebar {
+    max-height: 25dvh;
+  }
+
+  .topbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: auto auto;
+    align-items: center;
+    gap: 0.35rem 0.5rem;
+    padding: 0.45rem 0.6rem;
+  }
+
+  .project-meta {
+    grid-column: 1;
+    grid-row: 1;
+    overflow: hidden;
+  }
+
+  .title-with-actions {
+    gap: 0.35rem;
+  }
+
+  .title-with-actions h1 {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .project-subtitle {
+    display: none;
+  }
+
+  .projects-sidebar-toggle {
+    width: 30px;
+    height: 30px;
+    flex-basis: 30px;
+  }
+
+  .topbar-actions {
+    grid-column: 2;
+    grid-row: 1;
+    justify-content: flex-end;
+    flex-wrap: nowrap;
+    gap: 0.35rem;
+    overflow: visible;
+    padding: 0;
+  }
+
+  #btnAddTask {
+    min-height: 34px;
+    padding: 0.4rem 0.6rem;
+    white-space: nowrap;
+  }
+
+  .topbar-more-actions {
+    display: block;
+    position: relative;
+  }
+
+  .topbar-more-actions > summary {
+    display: flex;
+    align-items: center;
+    min-height: 34px;
+    padding: 0.4rem 0.6rem;
+    cursor: pointer;
+    list-style: none;
+    white-space: nowrap;
+  }
+
+  .topbar-more-actions > summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .topbar-more-actions > button {
+    display: none;
+  }
+
+  .topbar-more-actions[open] > button {
+    position: absolute;
+    z-index: 20;
+    right: 0;
+    display: block;
+    width: max-content;
+    min-width: 160px;
+    text-align: left;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  }
+
+  .topbar-more-actions[open] > button:first-of-type {
+    top: calc(100% + 0.25rem);
+  }
+
+  .topbar-more-actions[open] > button:nth-of-type(2) {
+    top: calc(100% + 2.8rem);
+  }
+
+  .topbar-more-actions[open] > button:nth-of-type(3) {
+    top: calc(100% + 5.35rem);
+  }
+
+  .view-switcher {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    width: 100%;
+    min-width: 0;
+    gap: 0.1rem;
+    padding: 2px;
+  }
+
+  .view-btn {
+    min-height: 34px;
+    gap: 0.25rem;
+    padding: 0.3rem 0.5rem;
+    font-size: 0.75rem;
+  }
+
+  .view-btn svg {
+    width: 15px;
+    height: 15px;
+    flex: 0 0 15px;
+  }
+
+  .view-section {
+    padding: 0.5rem;
+  }
+
+  .view-section.active {
+    margin-top: 0;
+  }
+}
+
+@media (max-width: 420px) {
+  .sidebar {
+    max-height: 28dvh;
+  }
+
+  .topbar {
+    padding-inline: 0.45rem;
+  }
+
+  .view-btn {
+    padding-inline: 0.38rem;
   }
 }

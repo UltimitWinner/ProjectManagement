@@ -102,10 +102,10 @@
           </div>
           <div class="form-row">
             <div class="form-group">
-              <label for="digestLookaheadDays">Include tasks due today and the next</label>
+              <label for="digestLookaheadDays"><span id="digestLookaheadLabel">Include tasks due today and the next</span></label>
               <div class="inline-input-with-suffix">
                 <input type="number" id="digestLookaheadDays" min="0" max="30" step="1" value="7" required>
-                <span>days</span>
+                <span id="digestLookaheadUnit">days</span>
               </div>
               <small class="form-hint">Set to 0 to include tasks due today only. Maximum 30 days.</small>
             </div>
@@ -287,9 +287,12 @@
         </div>
 
         <div class="topbar-actions">
-          <button id="btnToggleTheme" class="btn-secondary" type="button" aria-pressed="false">Light mode</button>
-          <button id="btnDataTransfer" class="btn-secondary">Import / Export</button>
-          <button id="btnNewFolderTop" class="btn-secondary edit-required">+ New Folder</button>
+          <details class="topbar-more-actions">
+            <summary class="btn-secondary">More</summary>
+            <button id="btnToggleTheme" class="btn-secondary" type="button" aria-pressed="false">Light mode</button>
+            <button id="btnDataTransfer" class="btn-secondary">Import / Export</button>
+            <button id="btnNewFolderTop" class="btn-secondary edit-required">+ New Folder</button>
+          </details>
           <button id="btnAddTask" class="btn-primary edit-required">+ Add Task</button>
         </div>
       </header>

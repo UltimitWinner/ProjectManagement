@@ -122,6 +122,7 @@ function setupEventListeners() {
   document.getElementById('btnCloseEmailPreferences').addEventListener('click', closeEmailPreferencesModal);
   document.getElementById('btnCancelEmailPreferences').addEventListener('click', closeEmailPreferencesModal);
   document.getElementById('emailEnabled').addEventListener('change', updateEmailPreferenceVisibility);
+  document.getElementById('digestLookaheadDays').addEventListener('input', updateDigestLookaheadUnit);
   document.getElementById('emailPreferencesForm').addEventListener('submit', handleSaveEmailPreferences);
 
   // Project Modals
@@ -317,6 +318,14 @@ function updateEmailPreferenceVisibility() {
   });
 }
 
+function updateDigestLookaheadUnit() {
+  const days = Number(document.getElementById('digestLookaheadDays').value);
+  document.getElementById('digestLookaheadUnit').textContent = days === 1 ? 'day' : 'days';
+  document.getElementById('digestLookaheadLabel').textContent = days === 0
+    ? 'Include tasks due today only'
+    : 'Include tasks due today and the next';
+}
+
 function renderProjectDigestSettings(projectPreferences, preferences) {
   const container = document.getElementById('projectDigestSettingsList');
   if (!projectPreferences?.length) {
@@ -387,6 +396,7 @@ async function openEmailPreferencesModal() {
     populateEmailTimezoneOptions(result.hasSaved ? preferences.timezone : browserZone);
     document.getElementById('digestOverdue').checked = preferences.include_overdue !== false;
     document.getElementById('digestLookaheadDays').value = preferences.lookahead_days ?? 7;
+    updateDigestLookaheadUnit();
     document.getElementById('digestUndatedOpen').checked = Boolean(preferences.include_undated_open);
     document.getElementById('digestWeekendDelivery').value = preferences.weekend_delivery || 'always';
     document.getElementById('digestHolidayDelivery').value = preferences.holiday_delivery || 'always';
@@ -469,8 +479,11 @@ async function handleChangePassword(event) {
 }
 
 function applyProjectsSidebarPreference() {
-  let hidden = false;
-  try { hidden = localStorage.getItem('pulseplan_projects_sidebar_hidden') === 'true'; } catch {}
+  let savedPreference = null;
+  try { savedPreference = localStorage.getItem('pulseplan_projects_sidebar_hidden'); } catch {}
+  const hidden = savedPreference === null
+    ? window.matchMedia('(max-width: 760px)').matches
+    : savedPreference === 'true';
   setProjectsSidebarHidden(hidden, false);
 }
 
