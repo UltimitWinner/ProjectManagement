@@ -361,14 +361,12 @@
                 style="color:var(--accent);">
                 <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
               </svg>
-              <h3>Folder Tree & Nested Subfolders</h3>
+              <h3>Folders</h3>
             </div>
             <div class="workspace-actions">
               <span id="folderSelectedTaskCount" class="form-hint" aria-live="polite">0 selected</span>
               <button id="btnExportSelectedFolderTasks" class="btn-secondary" type="button" disabled>Export
                 selected</button>
-              <span class="form-hint">Drag folder headers or tasks to reorder · Tasks stay in their folder · Double
-                click a task to edit</span>
             </div>
           </div>
           <div id="folderTreeContainer" class="folder-tree-container">
@@ -409,8 +407,6 @@
         <div class="list-toolbar">
           <label class="list-filter"><input id="excludeDoneTasks" type="checkbox"> Hide completed tasks</label>
           <span id="listSortSummary" class="list-sort-summary">Sort order: Status ↑</span>
-          <span class="list-sort-hint">Click a heading for primary sort; Shift+click to add or change ranked
-            sorts.</span>
           <button id="clearListSort" class="btn-secondary" type="button">Clear sort</button>
           <span id="selectedTaskCount" class="list-sort-summary" aria-live="polite">0 selected</span>
           <button id="btnExportSelectedListTasks" class="btn-secondary" type="button" disabled>Export selected</button>
@@ -473,7 +469,6 @@
               names</button>
             <button type="button" class="btn-secondary gantt-control-button" id="exportGanttSvg">Export Gantt
               SVG</button>
-            <span class="gantt-tip">Double click any task bar or row to edit details.</span>
           </div>
         </div>
         <div class="gantt-viewport" id="ganttViewport">
@@ -545,8 +540,7 @@
         <div class="form-row">
           <div class="form-group task-grade-fields">
             <label for="taskGrade">Grade Override % <span class="form-hint"
-                style="display:inline; font-size:0.72rem;">(optional — overrides points ratio for
-                calculations)</span></label>
+                style="display:inline; font-size:0.72rem;">(optional)</span></label>
             <input type="number" id="taskGrade" step="0.01" min="0" placeholder="e.g. 105 (leave blank to use points)">
           </div>
           <div class="form-group form-checkbox-group task-grade-fields">

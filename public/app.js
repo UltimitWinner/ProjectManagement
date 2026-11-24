@@ -91,9 +91,18 @@ document.addEventListener('DOMContentLoaded', async () => {
 function setupEventListeners() {
   document.getElementById('btnToggleProjectsSidebar').addEventListener('click', toggleProjectsSidebar);
   document.getElementById('btnToggleTheme').addEventListener('click', toggleTheme);
+  const topbarMoreActions = document.querySelector('.topbar-more-actions');
+  topbarMoreActions.querySelectorAll('button').forEach(button => {
+    button.addEventListener('click', () => { topbarMoreActions.open = false; });
+  });
+  document.addEventListener('click', event => {
+    if (topbarMoreActions.open && !topbarMoreActions.contains(event.target)) topbarMoreActions.open = false;
+  });
+  installMobileScrollChrome();
   // View Switcher
   document.querySelectorAll('.view-btn').forEach(btn => {
     btn.addEventListener('click', () => {
+      setMobileChromeCollapsed(false);
       document.querySelectorAll('.view-btn').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
       currentView = btn.dataset.view;
@@ -517,6 +526,42 @@ function setProjectsSidebarHidden(hidden, persist) {
   if (persist) {
     try { localStorage.setItem('pulseplan_projects_sidebar_hidden', String(hidden)); } catch {}
   }
+}
+
+function setMobileChromeCollapsed(collapsed, viewElement = document.querySelector('.view-section.active')) {
+  const isMobile = window.matchMedia('(max-width: 760px)').matches;
+  document.querySelector('.app-container').classList.toggle('mobile-chrome-collapsed', isMobile && collapsed);
+  document.querySelectorAll('.view-section').forEach(view => view.classList.remove('mobile-controls-collapsed'));
+  if (isMobile && collapsed && viewElement) viewElement.classList.add('mobile-controls-collapsed');
+}
+
+function installMobileScrollChrome() {
+  const sources = [
+    [folderView, folderView, document.getElementById('folderTreeContainer')],
+    [boardView, ...document.querySelectorAll('.column-tasks')],
+    [listView, listView, document.getElementById('listView').querySelector('.list-container')],
+    [ganttView, document.getElementById('ganttChartArea'), document.getElementById('ganttSidebarCol')]
+  ];
+  const lastScrollPositions = new WeakMap();
+  for (const [view, ...scrollers] of sources) {
+    for (const scroller of scrollers) {
+      if (!scroller) continue;
+      lastScrollPositions.set(scroller, scroller.scrollTop);
+      scroller.addEventListener('scroll', () => {
+        if (!window.matchMedia('(max-width: 760px)').matches || !view.classList.contains('active')) return;
+        const position = scroller.scrollTop;
+        const previous = lastScrollPositions.get(scroller) ?? position;
+        const movement = position - previous;
+        lastScrollPositions.set(scroller, position);
+        if (Math.abs(movement) < 5) return;
+        if (movement > 0 && position > 12) setMobileChromeCollapsed(true, view);
+        else if (movement < 0 || position <= 4) setMobileChromeCollapsed(false, view);
+      }, { passive: true });
+    }
+  }
+  window.addEventListener('resize', () => {
+    if (!window.matchMedia('(max-width: 760px)').matches) setMobileChromeCollapsed(false);
+  }, { passive: true });
 }
 
 function applyThemePreference() {
@@ -1283,10 +1328,10 @@ async function loadProjects() {
       currentProjectAccess = 'none';
       updateProjectPermissionsButton();
       currentProjectTitle.textContent = 'No Projects Available';
-      currentProjectDesc.textContent = 'There are no projects in your sidebar. Use + to create one or ask a project creator to grant you access.';
+      currentProjectDesc.textContent = 'No projects to show.';
       document.getElementById('restrictedMsg').textContent = currentUser.systemRole === 'admin'
-        ? 'No projects are currently visible. Use + to create a project or restore access in Project Permissions.'
-        : 'No projects are currently available. Use + to create a project or ask a project creator to grant you access.';
+        ? 'No projects are currently visible.'
+        : 'No accessible projects.';
       tasks = [];
       folders = [];
       customFields = [];
@@ -1309,6 +1354,7 @@ async function loadProjects() {
 async function selectProject(id) {
   const selectionVersion = ++projectSelectionVersion;
   const projectChanged = currentProjectId !== id;
+  if (projectChanged) setMobileChromeCollapsed(false);
   if (projectChanged) {
     selectedStatsFolderId = undefined;
     selectedTaskIds.clear();
@@ -2844,8 +2890,8 @@ function renderListView() {
   const columnLabels = new Map(cols.filter(([, key]) => key).map(([label, key]) => [key, label]));
   columnLabels.set('manual_order', 'Saved order');
   sortSummary.textContent = listSortState.length
-    ? `Sort order: ${listSortState.map(({ key, dir }) => `${columnLabels.get(key) || key} ${dir === 'asc' ? '↑' : '↓'}`).join(' → ')}`
-    : 'No sort applied';
+    ? `Sort: ${listSortState.map(({ key, dir }) => `${columnLabels.get(key) || key} ${dir === 'asc' ? '↑' : '↓'}`).join(' → ')}`
+    : 'Default order';
   clearSortButton.disabled = listSortState.length === 0;
   const existingTaskIds = new Set(tasks.map(task => task.id));
   selectedTaskIds = new Set([...selectedTaskIds].filter(id => existingTaskIds.has(id)));
@@ -2875,7 +2921,7 @@ function renderListView() {
         ? ` <sup style="opacity:0.6;">${listSortState.indexOf(sortEntry) + 1}</sup>` : '';
       th.innerHTML = `<span class="sort-th">${escapeHtml(label)}${arrow}${rank}</span>`;
       th.style.cursor = 'pointer';
-      th.title = 'Click to set the primary sort. Shift+click to add or change a ranked sort level.';
+      th.title = `Sort by ${label}`;
       th.addEventListener('click', e => {
         if (e.shiftKey) {
           // Add/toggle as secondary sort key
@@ -3202,7 +3248,7 @@ function renderGanttView() {
     sideCell.style.flexBasis = `${rowHeight(entry)}px`;
     sideCell.style.fontSize = `${Math.max(1, 13.6 * yScale)}px`;
     sideCell.textContent = task.title;
-    sideCell.title = `${task.title} (Double click to edit)`;
+    sideCell.title = task.title;
     sideCell.addEventListener('click', () => {
       if (Date.now() - lastGanttDropAt >= 350) openTaskModal(task);
     });
