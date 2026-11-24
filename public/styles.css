@@ -2576,6 +2576,55 @@ textarea:focus {
     width: 100%;
   }
 
+  .tree-task-row {
+    position: relative;
+    display: block;
+    min-width: 0;
+    padding: 0.5rem 4.35rem 0.5rem 0.55rem;
+  }
+
+  .tree-task-main {
+    min-width: 0;
+    flex-wrap: wrap;
+    gap: 0.25rem 0.45rem;
+  }
+
+  .tree-task-main > .badge,
+  .tree-task-main > .badge-custom {
+    display: none;
+  }
+
+  .tree-task-title {
+    flex: 1 1 120px;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .tree-task-meta {
+    min-width: 0;
+    flex-wrap: wrap;
+    gap: 0.2rem 0.65rem;
+    margin-top: 0.25rem;
+    font-size: 0.72rem;
+  }
+
+  .tree-task-date {
+    min-width: 0;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .tree-task-meta > [data-action="edit-task"] {
+    position: absolute;
+    top: 0.4rem;
+    right: 0.45rem;
+    min-height: 32px;
+    padding: 0.3rem 0.55rem !important;
+    white-space: nowrap;
+  }
+
   .topbar {
     max-height: 112px;
     overflow: visible;
