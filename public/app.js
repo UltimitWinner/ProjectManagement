@@ -98,8 +98,19 @@ function setupEventListeners() {
   document.addEventListener('click', event => {
     if (topbarMoreActions.open && !topbarMoreActions.contains(event.target)) topbarMoreActions.open = false;
   });
+  document.addEventListener('click', event => {
+    const app = document.querySelector('.app-container');
+    if (!window.matchMedia('(max-width: 760px)').matches
+      || !app.classList.contains('mobile-chrome-collapsed')
+      || event.target.closest('.modal-overlay:not(.hidden)')
+      || event.clientY > 24) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setMobileChromeCollapsed(false);
+  }, true);
   document.addEventListener('keydown', handleModalKeyboardShortcuts);
   installMobileScrollChrome();
+  document.getElementById('mobileChromeReveal').addEventListener('click', () => setMobileChromeCollapsed(false));
   // View Switcher
   document.querySelectorAll('.view-btn').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -540,7 +551,7 @@ function applyProjectsSidebarPreference() {
   let savedPreference = null;
   try { savedPreference = localStorage.getItem('pulseplan_projects_sidebar_hidden'); } catch {}
   const hidden = savedPreference === null
-    ? window.matchMedia('(max-width: 760px)').matches
+    ? false
     : savedPreference === 'true';
   setProjectsSidebarHidden(hidden, false);
 }
@@ -569,29 +580,52 @@ function setMobileChromeCollapsed(collapsed, viewElement = document.querySelecto
 }
 
 function installMobileScrollChrome() {
-  const sources = [
-    [folderView, folderView, document.getElementById('folderTreeContainer')],
-    [boardView, ...document.querySelectorAll('.column-tasks')],
-    [listView, listView, document.getElementById('listView').querySelector('.list-container')],
-    [ganttView, document.getElementById('ganttChartArea'), document.getElementById('ganttSidebarCol')]
-  ];
-  const lastScrollPositions = new WeakMap();
-  for (const [view, ...scrollers] of sources) {
-    for (const scroller of scrollers) {
-      if (!scroller) continue;
-      lastScrollPositions.set(scroller, scroller.scrollTop);
-      scroller.addEventListener('scroll', () => {
-        if (!window.matchMedia('(max-width: 760px)').matches || !view.classList.contains('active')) return;
-        const position = scroller.scrollTop;
-        const previous = lastScrollPositions.get(scroller) ?? position;
-        const movement = position - previous;
-        lastScrollPositions.set(scroller, position);
-        if (Math.abs(movement) < 5) return;
-        if (movement > 0 && position > 12) setMobileChromeCollapsed(true, view);
-        else if (movement < 0 || position <= 4) setMobileChromeCollapsed(false, view);
-      }, { passive: true });
+  const contentBodySelector = [
+    '#folderTreeContainer',
+    '#boardView .kanban-grid', '#boardView .column-tasks',
+    '#listView .list-container',
+    '#ganttView .gantt-viewport', '#ganttView .gantt-chart-area', '#ganttView .gantt-sidebar-col'
+  ].join(',');
+  const isMobile = () => window.matchMedia('(max-width: 760px)').matches;
+  const isOutsideContent = target => target instanceof Element
+    && !target.closest(contentBodySelector)
+    && !target.closest('.modal-overlay:not(.hidden)');
+
+  document.addEventListener('wheel', event => {
+    if (!isMobile() || !isOutsideContent(event.target) || Math.abs(event.deltaY) < 8) return;
+    setMobileChromeCollapsed(event.deltaY > 0);
+  }, { capture: true, passive: true });
+
+  let touchY = null;
+  let accumulatedTouchMovement = 0;
+  let touchStartedOutsideContent = false;
+  document.addEventListener('touchstart', event => {
+    if (!isMobile() || event.touches.length !== 1) {
+      touchY = null;
+      accumulatedTouchMovement = 0;
+      touchStartedOutsideContent = false;
+      return;
     }
-  }
+    touchStartedOutsideContent = isOutsideContent(event.target);
+    touchY = touchStartedOutsideContent ? event.touches[0].clientY : null;
+    accumulatedTouchMovement = 0;
+  }, { capture: true, passive: true });
+  document.addEventListener('touchmove', event => {
+    if (touchY === null || !touchStartedOutsideContent || event.touches.length !== 1) return;
+    const nextY = event.touches[0].clientY;
+    accumulatedTouchMovement += touchY - nextY;
+    touchY = nextY;
+    if (Math.abs(accumulatedTouchMovement) >= 16) {
+      setMobileChromeCollapsed(accumulatedTouchMovement > 0);
+      accumulatedTouchMovement = 0;
+    }
+  }, { capture: true, passive: true });
+  document.addEventListener('touchend', () => {
+    touchY = null;
+    accumulatedTouchMovement = 0;
+    touchStartedOutsideContent = false;
+  }, { capture: true, passive: true });
+
   window.addEventListener('resize', () => {
     if (!window.matchMedia('(max-width: 760px)').matches) setMobileChromeCollapsed(false);
   }, { passive: true });
