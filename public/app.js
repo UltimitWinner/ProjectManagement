@@ -98,6 +98,7 @@ function setupEventListeners() {
   document.addEventListener('click', event => {
     if (topbarMoreActions.open && !topbarMoreActions.contains(event.target)) topbarMoreActions.open = false;
   });
+  document.addEventListener('keydown', handleModalKeyboardShortcuts);
   installMobileScrollChrome();
   // View Switcher
   document.querySelectorAll('.view-btn').forEach(btn => {
@@ -274,6 +275,38 @@ function setupEventListeners() {
   ganttViewport.addEventListener('dragover', handleGanttDragOver);
   ganttViewport.addEventListener('dragleave', handleGanttDragLeave);
   ganttViewport.addEventListener('drop', handleGanttDrop);
+}
+
+function handleModalKeyboardShortcuts(event) {
+  const openModals = [...document.querySelectorAll('.modal-overlay:not(.hidden)')];
+  const modal = openModals.at(-1);
+  const topbarMoreActions = document.querySelector('.topbar-more-actions');
+
+  if (event.key === 'Escape') {
+    if (modal) {
+      event.preventDefault();
+      const closeButton = modal.querySelector('.modal-close');
+      if (closeButton) closeButton.click();
+      else modal.classList.add('hidden');
+    } else if (topbarMoreActions.open) {
+      topbarMoreActions.open = false;
+    }
+    return;
+  }
+
+  if (event.key !== 'Enter' || event.repeat || event.isComposing || !modal) return;
+  const target = event.target;
+  if (target instanceof HTMLTextAreaElement && event.shiftKey) return;
+  const isFormField = target instanceof HTMLInputElement
+    || target instanceof HTMLTextAreaElement
+    || target instanceof HTMLSelectElement;
+  if (!isFormField) return;
+  if (target instanceof HTMLInputElement
+    && ['button', 'submit', 'reset', 'file', 'color'].includes(target.type)) return;
+  const form = target.closest('form');
+  if (!form || !modal.contains(form)) return;
+  event.preventDefault();
+  form.requestSubmit();
 }
 
 function closeChangePasswordModal() {
