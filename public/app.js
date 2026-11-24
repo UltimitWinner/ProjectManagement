@@ -92,11 +92,19 @@ function setupEventListeners() {
   document.getElementById('btnToggleProjectsSidebar').addEventListener('click', toggleProjectsSidebar);
   document.querySelectorAll('[data-theme-toggle]').forEach(button => button.addEventListener('click', toggleTheme));
   const topbarMoreActions = document.querySelector('.topbar-more-actions');
+  const topbarBreakpoint = window.matchMedia('(max-width: 760px)');
+  const syncTopbarActions = () => { topbarMoreActions.open = !topbarBreakpoint.matches; };
+  syncTopbarActions();
+  topbarBreakpoint.addEventListener('change', syncTopbarActions);
   topbarMoreActions.querySelectorAll('button').forEach(button => {
-    button.addEventListener('click', () => { topbarMoreActions.open = false; });
+    button.addEventListener('click', () => {
+      if (topbarBreakpoint.matches) topbarMoreActions.open = false;
+    });
   });
   document.addEventListener('click', event => {
-    if (topbarMoreActions.open && !topbarMoreActions.contains(event.target)) topbarMoreActions.open = false;
+    if (topbarBreakpoint.matches && topbarMoreActions.open && !topbarMoreActions.contains(event.target)) {
+      topbarMoreActions.open = false;
+    }
   });
   document.addEventListener('click', event => {
     const app = document.querySelector('.app-container');
