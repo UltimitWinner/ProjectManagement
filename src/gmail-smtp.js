@@ -122,7 +122,7 @@ async function stableMessageId(idempotencyKey) {
   return `${token}@myplan.local`;
 }
 
-export async function sendGmailSmtp({ address, appPassword, recipient, message, idempotencyKey }) {
+export async function sendGmailSmtp({ address, appPassword, recipient, message, idempotencyKey, beforeSend }) {
   if (!address || !appPassword) throw new Error('Gmail sender address and App Password are not configured.');
   const cleanPassword = String(appPassword).replace(/\s/g, '');
   const messageId = await stableMessageId(idempotencyKey);
@@ -148,6 +148,12 @@ export async function sendGmailSmtp({ address, appPassword, recipient, message, 
     await expect(channel, base64Text(cleanPassword), [235]);
     await expect(channel, `MAIL FROM:<${address}>`, [250]);
     await expect(channel, `RCPT TO:<${recipient}>`, [250, 251]);
+    if (beforeSend && !(await beforeSend())) {
+      await expect(channel, 'RSET', [250]);
+      await expect(channel, 'QUIT', [221]);
+      channel.release();
+      return null;
+    }
     await expect(channel, 'DATA', [354]);
     await channel.write(`${mime.replace(/\r?\n/g, '\r\n')}\r\n.\r\n`);
     await expect(channel, null, [250]);

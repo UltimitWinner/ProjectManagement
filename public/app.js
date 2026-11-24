@@ -122,6 +122,7 @@ function setupEventListeners() {
   document.getElementById('btnCloseEmailPreferences').addEventListener('click', closeEmailPreferencesModal);
   document.getElementById('btnCancelEmailPreferences').addEventListener('click', closeEmailPreferencesModal);
   document.getElementById('emailEnabled').addEventListener('change', updateEmailPreferenceVisibility);
+  document.getElementById('dailyDigestEnabled').addEventListener('change', updateEmailPreferenceVisibility);
   document.getElementById('digestLookaheadDays').addEventListener('input', updateDigestLookaheadUnit);
   document.getElementById('emailPreferencesForm').addEventListener('submit', handleSaveEmailPreferences);
 
@@ -292,10 +293,15 @@ function populateEmailTimezoneOptions(selectedTimeZone) {
 
 function updateEmailPreferenceVisibility() {
   const enabled = document.getElementById('emailEnabled').checked;
-  document.getElementById('emailDigestFields').classList.toggle('hidden', !enabled);
+  const digestEnabled = enabled && document.getElementById('dailyDigestEnabled').checked;
+  document.getElementById('emailNotificationFields').classList.toggle('hidden', !enabled);
+  document.getElementById('emailDigestFields').classList.toggle('hidden', !digestEnabled);
   const email = document.getElementById('notificationEmail');
   const time = document.getElementById('dailyDigestTime');
   const timezone = document.getElementById('dailyDigestTimezone');
+  document.getElementById('dailyDigestEnabled').disabled = !enabled;
+  document.getElementById('alertDueSoon').disabled = !enabled;
+  document.getElementById('alertOverdue').disabled = !enabled;
   const digestControls = [
     document.getElementById('digestLookaheadDays'),
     document.getElementById('digestOverdue'),
@@ -304,16 +310,20 @@ function updateEmailPreferenceVisibility() {
     document.getElementById('digestHolidayDelivery')
   ];
   email.required = enabled;
-  time.required = enabled;
+  email.disabled = !enabled;
+  time.required = digestEnabled;
   timezone.required = enabled;
-  digestControls.forEach(input => { input.required = enabled && input.id === 'digestLookaheadDays'; });
-  [email, time, timezone, ...digestControls]
-    .forEach(input => { input.disabled = !enabled; });
+  time.disabled = !digestEnabled;
+  timezone.disabled = !enabled;
+  digestControls.forEach(input => {
+    input.required = digestEnabled && input.id === 'digestLookaheadDays';
+    input.disabled = !digestEnabled;
+  });
   document.querySelectorAll('.project-digest-setting').forEach(row => {
     const includeProject = row.querySelector('.project-digest-include');
-    includeProject.disabled = !enabled;
+    includeProject.disabled = !digestEnabled;
     row.querySelectorAll('.project-digest-override').forEach(input => {
-      input.disabled = !enabled || !includeProject.checked;
+      input.disabled = !digestEnabled || !includeProject.checked;
     });
   });
 }
@@ -390,6 +400,9 @@ async function openEmailPreferencesModal() {
     const result = await api('/api/notifications/preferences');
     const preferences = result.preferences || {};
     document.getElementById('emailEnabled').checked = Boolean(preferences.email_enabled);
+    document.getElementById('dailyDigestEnabled').checked = Boolean(preferences.daily_digest_enabled);
+    document.getElementById('alertDueSoon').checked = Boolean(preferences.alert_due_soon);
+    document.getElementById('alertOverdue').checked = Boolean(preferences.alert_overdue);
     document.getElementById('notificationEmail').value = preferences.email || '';
     document.getElementById('dailyDigestTime').value = preferences.daily_digest_time || '08:00';
     const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
@@ -417,6 +430,9 @@ async function handleSaveEmailPreferences(event) {
   status.classList.add('hidden');
   const payload = {
     email_enabled: document.getElementById('emailEnabled').checked,
+    daily_digest_enabled: document.getElementById('dailyDigestEnabled').checked,
+    alert_due_soon: document.getElementById('alertDueSoon').checked,
+    alert_overdue: document.getElementById('alertOverdue').checked,
     email: document.getElementById('notificationEmail').value.trim(),
     daily_digest_time: document.getElementById('dailyDigestTime').value,
     timezone: document.getElementById('dailyDigestTimezone').value,

@@ -82,22 +82,30 @@
         <div class="form-group form-checkbox-group">
           <label for="emailEnabled">
             <input type="checkbox" id="emailEnabled">
-            Receive daily digest emails
+            Receive MyPlan emails
           </label>
         </div>
-        <div id="emailDigestFields" class="hidden">
-          <div class="form-group">
+        <div id="emailNotificationFields" class="hidden">
+          <div class="form-group" id="emailAddressGroup">
             <label for="notificationEmail">Email address *</label>
             <input type="email" id="notificationEmail" maxlength="254" autocomplete="email" placeholder="you@example.com">
           </div>
+          <div class="form-group">
+            <label for="dailyDigestTimezone">Time zone</label>
+            <select id="dailyDigestTimezone" required></select>
+            <small class="form-hint">Used for the daily digest and task deadline alerts.</small>
+          </div>
+          <div class="form-group form-checkbox-group">
+            <label for="dailyDigestEnabled"><input type="checkbox" id="dailyDigestEnabled"> Send a daily digest</label>
+            <label for="alertDueSoon"><input type="checkbox" id="alertDueSoon"> Alert me one hour before a task is due</label>
+            <label for="alertOverdue"><input type="checkbox" id="alertOverdue"> Alert me when a task becomes overdue</label>
+            <small class="form-hint">Each selected alert is sent at most once per deadline. Repeating tasks are ignored, and tasks completed before sending are suppressed. Date-only tasks become overdue at midnight in your selected time zone.</small>
+          </div>
+          <div id="emailDigestFields" class="hidden">
           <div class="form-row">
             <div class="form-group">
               <label for="dailyDigestTime">Send daily at</label>
               <input type="time" id="dailyDigestTime" value="08:00" required>
-            </div>
-            <div class="form-group">
-              <label for="dailyDigestTimezone">Time zone</label>
-              <select id="dailyDigestTimezone" required></select>
             </div>
           </div>
           <div class="form-row">
@@ -140,6 +148,7 @@
             <div id="projectDigestSettingsList" class="project-digest-settings-list"></div>
           </fieldset>
           <p class="form-hint">Weekend rules use each project’s non-working weekdays, and holiday rules use that project’s holiday calendar. Rules apply per project. “Only if the digest has tasks” includes future tasks such as one due tomorrow. Completed one-time tasks are omitted; repeating tasks show their next non-overdue occurrence.</p>
+          </div>
         </div>
         <p id="emailSenderStatus" class="form-hint" role="status"></p>
         <p id="emailPreferencesStatus" class="form-hint hidden" role="status"></p>

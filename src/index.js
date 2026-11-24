@@ -416,15 +416,267 @@ function isEmailSenderConfigured(env) {
   return Boolean(env.GMAIL_ADDRESS && env.GMAIL_APP_PASSWORD);
 }
 
-async function sendDigestEmail(env, email, message, idempotencyKey) {
+async function sendDigestEmail(env, email, message, idempotencyKey, beforeSend) {
   const { sendGmailSmtp } = await import('./gmail-smtp.js');
   return sendGmailSmtp({
     address: env.GMAIL_ADDRESS,
     appPassword: env.GMAIL_APP_PASSWORD,
     recipient: email,
     message,
-    idempotencyKey
+    idempotencyKey,
+    beforeSend
   });
+}
+
+function localDateTimeEpoch(dateValue, timeValue, timeZone) {
+  const dateMatch = String(dateValue || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const timeMatch = String(timeValue || '').match(/^(\d{2}):(\d{2})$/);
+  if (!dateMatch || !timeMatch) return null;
+  const targetLocalEpoch = Date.UTC(
+    Number(dateMatch[1]), Number(dateMatch[2]) - 1, Number(dateMatch[3]),
+    Number(timeMatch[1]), Number(timeMatch[2])
+  );
+  let candidateEpoch = targetLocalEpoch;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const local = zonedDateTime(new Date(candidateEpoch), timeZone);
+    const [year, month, day] = local.date.split('-').map(Number);
+    const [hour, minute] = local.time.split(':').map(Number);
+    const observedLocalEpoch = Date.UTC(year, month - 1, day, hour, minute);
+    const adjustment = targetLocalEpoch - observedLocalEpoch;
+    if (adjustment === 0) return candidateEpoch;
+    // A deadline in the DST spring gap moves forward to the first valid wall time.
+    if (adjustment < 0) return candidateEpoch;
+    candidateEpoch += adjustment;
+  }
+  return candidateEpoch;
+}
+
+function taskAlertDeadline(task, timeZone) {
+  if (!task.due_date) return null;
+  if (task.due_time) return localDateTimeEpoch(task.due_date, task.due_time, timeZone);
+  const nextDate = new Date(`${task.due_date}T00:00:00.000Z`);
+  if (Number.isNaN(nextDate.getTime())) return null;
+  nextDate.setUTCDate(nextDate.getUTCDate() + 1);
+  return localDateTimeEpoch(nextDate.toISOString().slice(0, 10), '00:00', timeZone);
+}
+
+function taskAlertIsEligible(task, alertType, occurrenceKey, now) {
+  if (!task || task.status === 'done' || task.repeat_frequency || task.occurrence_key !== occurrenceKey) return false;
+  if (alertType === 'due_soon' && (Number(task.alert_due_soon) !== 1 || !task.due_time)) return false;
+  if (alertType === 'overdue' && Number(task.alert_overdue) !== 1) return false;
+  let deadline;
+  try { deadline = taskAlertDeadline(task, task.timezone || 'UTC'); } catch { return false; }
+  if (!Number.isFinite(deadline)) return false;
+  const remaining = deadline - now.getTime();
+  return alertType === 'due_soon'
+    ? remaining > 0 && remaining <= 60 * 60 * 1000
+    : remaining <= 0 && remaining >= -10 * 60 * 1000;
+}
+
+async function loadCurrentTaskAlerts(db, userId, taskIds) {
+  if (!taskIds.length) return [];
+  const placeholders = taskIds.map(() => '?').join(',');
+  const { results } = await db.prepare(`
+    SELECT t.id AS task_id, t.project_id, t.title, t.status, t.due_date, t.due_time,
+      COALESCE(t.repeat_frequency, '') AS repeat_frequency,
+      p.name AS project_name, f.name AS folder_name,
+      t.due_date || 'T' || COALESCE(NULLIF(t.due_time, ''), 'date') AS occurrence_key,
+      pref.email, pref.timezone, pref.alert_due_soon, pref.alert_overdue,
+      u.name, u.username, u.system_role
+    FROM tasks t
+    JOIN projects p ON p.id = t.project_id
+    JOIN users u ON u.id = ?
+    JOIN user_email_preferences pref ON pref.user_id = u.id
+    LEFT JOIN folders f ON f.id = t.folder_id
+    WHERE t.id IN (${placeholders}) AND pref.email_enabled = 1
+      AND pref.email IS NOT NULL AND pref.email != ''
+      AND t.status != 'done' AND COALESCE(t.repeat_frequency, '') = ''
+      AND (
+        EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = p.id AND pm.user_id = u.id AND pm.access_level != 'none')
+        OR (u.system_role = 'admin' AND NOT EXISTS (
+          SELECT 1 FROM project_members admin_pm WHERE admin_pm.project_id = p.id AND admin_pm.user_id = u.id AND admin_pm.access_level = 'none'
+        ))
+      )
+  `).bind(userId, ...taskIds).all();
+  return results || [];
+}
+
+function buildTaskAlertEmail(user, alerts, appUrl = '') {
+  const dueSoon = alerts.filter(alert => alert.alertType === 'due_soon');
+  const overdue = alerts.filter(alert => alert.alertType === 'overdue');
+  const alertRows = alerts.map(alert => {
+    const label = alert.alertType === 'overdue' ? 'Overdue' : 'Due within one hour';
+    const accent = alert.alertType === 'overdue' ? '#b42318' : '#b54708';
+    return `<tr><td style="padding:8px 24px;"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border:1px solid #e4e7ec;border-radius:10px;background:#fff;"><tr><td style="padding:14px 16px;border-left:4px solid ${accent};"><div style="font-size:11px;font-weight:700;text-transform:uppercase;color:${accent};">${label}</div><div style="padding-top:5px;font-size:15px;font-weight:650;line-height:21px;color:#182230;">${emailEscape(alert.title)}</div><div style="padding-top:5px;font-size:12px;line-height:18px;color:#667085;">${emailEscape(alert.project)}${alert.folder ? ` · ${emailEscape(alert.folder)}` : ''}</div><div style="padding-top:8px;font-size:12px;color:#344054;">Due ${emailEscape(emailDate(alert.due_date, { month: 'short', day: 'numeric' }))}${alert.due_time ? ` at ${emailEscape(alert.due_time)}` : ''}</div></td></tr></table></td></tr>`;
+  }).join('');
+  const title = overdue.length && dueSoon.length ? 'Tasks need your attention'
+    : overdue.length ? 'A task is overdue' : 'A task is due soon';
+  const appLink = appUrl
+    ? `<tr><td align="center" style="padding:22px 24px 8px;"><a href="${emailEscape(appUrl)}" style="display:inline-block;padding:11px 20px;border-radius:8px;background:#178c78;color:#fff;text-decoration:none;font-size:14px;font-weight:650;">Open MyPlan</a></td></tr>`
+    : '';
+  const html = `<!doctype html><html><body style="margin:0;padding:0;background:#f2f4f7;font-family:Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;color:#182230;"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f2f4f7;padding:24px 12px;"><tr><td align="center"><table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:600px;border-collapse:separate;border-spacing:0;background:#fff;border:1px solid #e4e7ec;border-radius:16px;overflow:hidden;"><tr><td style="padding:22px 24px;background:#132a3a;color:#fff;"><div style="font-size:12px;letter-spacing:1.5px;text-transform:uppercase;color:#a5f3e3;font-weight:700;">MYPLAN · TASK ALERT</div><h1 style="margin:10px 0 0;font-size:23px;line-height:30px;color:#fff;">${title}</h1><div style="padding-top:5px;font-size:14px;color:#d0d5dd;">Hi ${emailEscape(user.name || user.username)}, here’s your task update.</div></td></tr>${alertRows}${appLink}<tr><td style="padding:20px 24px 22px;text-align:center;color:#98a2b3;font-size:11px;line-height:17px;">You can adjust task email alerts in your MyPlan email preferences.</td></tr></table></td></tr></table></body></html>`;
+  const text = [title, `Hi ${user.name || user.username}, here’s your task update.`, '', ...alerts.map(alert => `${alert.alertType === 'overdue' ? 'OVERDUE' : 'DUE WITHIN ONE HOUR'}: ${alert.title} — ${alert.project}${alert.folder ? ` / ${alert.folder}` : ''} — Due ${alert.due_date}${alert.due_time ? ` at ${alert.due_time}` : ''}`), '', ...(appUrl ? [`Open MyPlan: ${appUrl}`] : [])].join('\n');
+  return { subject: `MyPlan task alert · ${alerts.length} task${alerts.length === 1 ? '' : 's'}`, html, text };
+}
+
+async function runTaskEmailAlertSchedule(env, now = new Date()) {
+  if (!isEmailSenderConfigured(env)) return { users: 0, sent: 0, skipped: 0, failed: 0, configured: false };
+  const dayBefore = new Date(now);
+  dayBefore.setUTCDate(dayBefore.getUTCDate() - 1);
+  const dayAfter = new Date(now);
+  dayAfter.setUTCDate(dayAfter.getUTCDate() + 1);
+  const { results } = await env.DB.prepare(`
+    SELECT pref.user_id, pref.email, pref.timezone, pref.alert_due_soon, pref.alert_overdue,
+      pref.updated_at AS preference_updated_at, u.name, u.username, u.system_role,
+      t.id AS task_id, t.project_id, t.title, t.status, t.due_date, t.due_time,
+      COALESCE(t.repeat_frequency, '') AS repeat_frequency,
+      p.name AS project_name, f.name AS folder_name,
+      t.due_date || 'T' || COALESCE(NULLIF(t.due_time, ''), 'date') AS occurrence_key
+    FROM tasks t
+    JOIN projects p ON p.id = t.project_id
+    JOIN user_email_preferences pref ON pref.email_enabled = 1
+      AND (pref.alert_due_soon = 1 OR pref.alert_overdue = 1)
+    JOIN users u ON u.id = pref.user_id
+    LEFT JOIN folders f ON f.id = t.folder_id
+    WHERE pref.email IS NOT NULL AND pref.email != ''
+      AND t.status != 'done' AND COALESCE(t.repeat_frequency, '') = ''
+      AND t.due_date IS NOT NULL AND t.due_date != ''
+      AND t.due_date BETWEEN ? AND ?
+      AND (
+        EXISTS (
+          SELECT 1 FROM project_members pm
+          WHERE pm.project_id = p.id AND pm.user_id = pref.user_id AND pm.access_level != 'none'
+        ) OR (
+          u.system_role = 'admin' AND NOT EXISTS (
+            SELECT 1 FROM project_members admin_pm
+            WHERE admin_pm.project_id = p.id AND admin_pm.user_id = pref.user_id AND admin_pm.access_level = 'none'
+          )
+        )
+      )
+      AND (
+        (pref.alert_due_soon = 1 AND NOT EXISTS (
+          SELECT 1 FROM email_task_alert_deliveries d
+          WHERE d.user_id = pref.user_id AND d.task_id = t.id
+            AND d.occurrence_key = t.due_date || 'T' || COALESCE(NULLIF(t.due_time, ''), 'date')
+            AND d.alert_type = 'due_soon'
+            AND (d.status IN ('sent', 'skipped') OR (d.status = 'sending' AND d.updated_at >= datetime('now', '-10 minutes')))
+        )) OR
+        (pref.alert_overdue = 1 AND NOT EXISTS (
+          SELECT 1 FROM email_task_alert_deliveries d
+          WHERE d.user_id = pref.user_id AND d.task_id = t.id
+            AND d.occurrence_key = t.due_date || 'T' || COALESCE(NULLIF(t.due_time, ''), 'date')
+            AND d.alert_type = 'overdue'
+            AND (d.status IN ('sent', 'skipped') OR (d.status = 'sending' AND d.updated_at >= datetime('now', '-10 minutes')))
+        ))
+      )
+    ORDER BY pref.updated_at ASC, t.due_date ASC, t.due_time ASC
+    LIMIT 5000
+  `).bind(dayBefore.toISOString().slice(0, 10), dayAfter.toISOString().slice(0, 10)).all();
+
+  const byUser = new Map();
+  for (const task of results || []) {
+    const timezone = task.timezone || 'UTC';
+    let dueAt;
+    try { dueAt = taskAlertDeadline(task, timezone); } catch { continue; }
+    if (!Number.isFinite(dueAt)) continue;
+    const minutesUntilDue = dueAt - now.getTime();
+    const alerts = [];
+    if (Number(task.alert_due_soon) === 1 && task.due_time && minutesUntilDue > 0 && minutesUntilDue <= 60 * 60 * 1000) {
+      alerts.push('due_soon');
+    }
+    if (Number(task.alert_overdue) === 1 && minutesUntilDue <= 0 && minutesUntilDue >= -10 * 60 * 1000) {
+      alerts.push('overdue');
+    }
+    if (!alerts.length) continue;
+    let group = byUser.get(task.user_id);
+    if (!group) {
+      group = { user: task, tasks: [] };
+      byUser.set(task.user_id, group);
+    }
+    for (const alertType of alerts) {
+      group.tasks.push({ ...task, alertType });
+    }
+  }
+
+  const stats = { users: 0, sent: 0, skipped: 0, failed: 0, configured: true };
+  for (const [userId, group] of byUser) {
+    if (stats.users >= 10) break;
+    stats.users += 1;
+    const candidates = group.tasks.slice(0, 25);
+    const claimStatements = candidates.map(alert => env.DB.prepare(`
+      INSERT INTO email_task_alert_deliveries (
+        user_id, task_id, occurrence_key, alert_type, status, attempts, updated_at
+      ) VALUES (?, ?, ?, ?, 'sending', 1, CURRENT_TIMESTAMP)
+      ON CONFLICT(user_id, task_id, occurrence_key, alert_type) DO UPDATE SET
+        status = 'sending', attempts = email_task_alert_deliveries.attempts + 1,
+        provider_error = NULL, updated_at = CURRENT_TIMESTAMP
+      WHERE (email_task_alert_deliveries.status = 'failed' AND email_task_alert_deliveries.updated_at < datetime('now', '-5 minutes'))
+        OR email_task_alert_deliveries.status = 'pending'
+        OR (email_task_alert_deliveries.status = 'sending' AND email_task_alert_deliveries.updated_at < datetime('now', '-10 minutes'))
+      RETURNING task_id
+    `).bind(userId, alert.task_id, alert.occurrence_key, alert.alertType));
+    const claimResults = claimStatements.length ? await env.DB.batch(claimStatements) : [];
+    const claimed = candidates.filter((alert, index) => claimResults[index]?.results?.length);
+    if (!claimed.length) continue;
+
+    const taskIds = [...new Set(claimed.map(alert => alert.task_id))];
+    const currentTasks = await loadCurrentTaskAlerts(env.DB, userId, taskIds);
+    const currentById = new Map(currentTasks.map(task => [task.task_id, task]));
+    const sendable = [];
+    const updates = [];
+    for (const alert of claimed) {
+      const task = currentById.get(alert.task_id);
+      if (!taskAlertIsEligible(task, alert.alertType, alert.occurrence_key, now)) {
+        updates.push(env.DB.prepare(`UPDATE email_task_alert_deliveries SET status = 'skipped', updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND task_id = ? AND occurrence_key = ? AND alert_type = ? AND status = 'sending'`)
+          .bind(userId, alert.task_id, alert.occurrence_key, alert.alertType));
+        stats.skipped += 1;
+        continue;
+      }
+      sendable.push({ ...task, alertType: alert.alertType, occurrence_key: alert.occurrence_key });
+    }
+    if (updates.length) await env.DB.batch(updates);
+    if (!sendable.length) continue;
+
+    try {
+      const message = buildTaskAlertEmail(sendable[0], sendable, normalizedAppUrl(env.APP_URL));
+      const idempotencyKey = `myplan-task-alert/${userId}/${sendable.map(alert => `${alert.alertType}/${alert.task_id}/${alert.occurrence_key}`).sort().join('|')}`;
+      let invalidOnFinalCheck = [];
+      const beforeSend = async () => {
+        const latestTasks = await loadCurrentTaskAlerts(env.DB, userId, taskIds);
+        const latestById = new Map(latestTasks.map(task => [task.task_id, task]));
+        const sendTime = new Date();
+        invalidOnFinalCheck = sendable.filter(alert => !taskAlertIsEligible(
+          latestById.get(alert.task_id), alert.alertType, alert.occurrence_key, sendTime
+        ));
+        return invalidOnFinalCheck.length === 0;
+      };
+      const messageId = await sendDigestEmail(env, currentTasks[0].email, message, idempotencyKey, beforeSend);
+      if (!messageId) {
+        const invalidKeys = new Set(invalidOnFinalCheck.map(alert => `${alert.task_id}/${alert.occurrence_key}/${alert.alertType}`));
+        await env.DB.batch(sendable.map(alert => env.DB.prepare(`
+          UPDATE email_task_alert_deliveries SET status = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE user_id = ? AND task_id = ? AND occurrence_key = ? AND alert_type = ? AND status = 'sending'
+        `).bind(invalidKeys.has(`${alert.task_id}/${alert.occurrence_key}/${alert.alertType}`) ? 'skipped' : 'pending',
+          userId, alert.task_id, alert.occurrence_key, alert.alertType)));
+        stats.skipped += invalidOnFinalCheck.length;
+        continue;
+      }
+      await env.DB.batch(sendable.map(alert => env.DB.prepare(`
+        UPDATE email_task_alert_deliveries SET status = 'sent', provider_message_id = ?, provider_error = NULL, updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = ? AND task_id = ? AND occurrence_key = ? AND alert_type = ? AND status = 'sending'
+      `).bind(messageId, userId, alert.task_id, alert.occurrence_key, alert.alertType)));
+      stats.sent += 1;
+    } catch (error) {
+      const providerError = sanitizeString(error?.message || 'Email delivery failed.', 500);
+      await env.DB.batch(sendable.map(alert => env.DB.prepare(`
+        UPDATE email_task_alert_deliveries SET status = 'failed', provider_error = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE user_id = ? AND task_id = ? AND occurrence_key = ? AND alert_type = ? AND status = 'sending'
+      `).bind(providerError, userId, alert.task_id, alert.occurrence_key, alert.alertType)));
+      stats.failed += 1;
+      console.error(`Task alert delivery failed for account ${userId}: ${providerError}`);
+    }
+  }
+  return stats;
 }
 
 async function runDailyDigestSchedule(env, now = new Date()) {
@@ -437,7 +689,8 @@ async function runDailyDigestSchedule(env, now = new Date()) {
     SELECT p.*, u.name, u.username, u.system_role
     FROM user_email_preferences p
     JOIN users u ON u.id = p.user_id
-    WHERE p.email_enabled = 1 AND p.email IS NOT NULL AND p.email != ''
+    WHERE p.email_enabled = 1 AND p.daily_digest_enabled = 1
+      AND p.email IS NOT NULL AND p.email != ''
     ORDER BY p.updated_at ASC
   `).all();
 
@@ -557,6 +810,9 @@ async function initializeTables(db) {
       user_id TEXT PRIMARY KEY,
       email TEXT DEFAULT NULL,
       email_enabled INTEGER NOT NULL DEFAULT 0,
+      daily_digest_enabled INTEGER NOT NULL DEFAULT 0,
+      alert_due_soon INTEGER NOT NULL DEFAULT 0,
+      alert_overdue INTEGER NOT NULL DEFAULT 0,
       daily_digest_time TEXT NOT NULL DEFAULT '08:00',
       timezone TEXT NOT NULL DEFAULT 'UTC',
       include_overdue INTEGER NOT NULL DEFAULT 1,
@@ -580,7 +836,22 @@ async function initializeTables(db) {
       PRIMARY KEY(user_id, local_date),
       FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
     )`),
+    db.prepare(`CREATE TABLE IF NOT EXISTS email_task_alert_deliveries (
+      user_id TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      occurrence_key TEXT NOT NULL,
+      alert_type TEXT NOT NULL,
+      status TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      provider_message_id TEXT DEFAULT NULL,
+      provider_error TEXT DEFAULT NULL,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY(user_id, task_id, occurrence_key, alert_type),
+      FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+    )`),
     db.prepare('CREATE INDEX IF NOT EXISTS idx_user_email_preferences_enabled ON user_email_preferences(email_enabled, daily_digest_time)'),
+    db.prepare('CREATE INDEX IF NOT EXISTS idx_email_task_alert_deliveries_updated ON email_task_alert_deliveries(status, updated_at)'),
     db.prepare(`CREATE TABLE IF NOT EXISTS user_project_email_preferences (
       user_id TEXT NOT NULL,
       project_id TEXT NOT NULL,
@@ -745,12 +1016,16 @@ async function initializeTables(db) {
     ['tasks', 'open_at', 'TEXT'],
     ['tasks', 'status_label', "TEXT NOT NULL DEFAULT ''"],
     ['user_email_preferences', 'lookahead_days', 'INTEGER NOT NULL DEFAULT 7'],
+    ['user_email_preferences', 'daily_digest_enabled', 'INTEGER NOT NULL DEFAULT 0'],
+    ['user_email_preferences', 'alert_due_soon', 'INTEGER NOT NULL DEFAULT 0'],
+    ['user_email_preferences', 'alert_overdue', 'INTEGER NOT NULL DEFAULT 0'],
     ['user_email_preferences', 'include_undated_open', 'INTEGER NOT NULL DEFAULT 0'],
     ['user_email_preferences', 'weekend_delivery', "TEXT NOT NULL DEFAULT 'always'"],
     ['user_email_preferences', 'holiday_delivery', "TEXT NOT NULL DEFAULT 'always'"],
   ]) {
     try { await db.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`).run(); } catch (e) { }
   }
+  await db.prepare('CREATE INDEX IF NOT EXISTS idx_tasks_due_alert_lookup ON tasks(due_date, status, project_id, due_time)').run();
 }
 
 // STRICT AUTHENTICATION: Returns user object or null
@@ -1267,6 +1542,9 @@ app.get('/api/notifications/preferences', async (c) => {
     preferences: row ? {
       email: row.email || '',
       email_enabled: Boolean(row.email_enabled),
+      daily_digest_enabled: Boolean(row.daily_digest_enabled),
+      alert_due_soon: Boolean(row.alert_due_soon),
+      alert_overdue: Boolean(row.alert_overdue),
       daily_digest_time: row.daily_digest_time || '08:00',
       timezone: row.timezone || 'UTC',
       include_overdue: Boolean(row.include_overdue),
@@ -1275,7 +1553,8 @@ app.get('/api/notifications/preferences', async (c) => {
       weekend_delivery: row.weekend_delivery || 'always',
       holiday_delivery: row.holiday_delivery || 'always'
     } : {
-      email: '', email_enabled: false, daily_digest_time: '08:00', timezone: 'UTC',
+      email: '', email_enabled: false, daily_digest_enabled: false,
+      alert_due_soon: false, alert_overdue: false, daily_digest_time: '08:00', timezone: 'UTC',
       include_overdue: true, lookahead_days: 7, include_undated_open: false,
       weekend_delivery: 'always', holiday_delivery: 'always'
     },
@@ -1299,14 +1578,18 @@ app.put('/api/notifications/preferences', async (c) => {
   let body;
   try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON payload' }, 400); }
   const email_enabled = body.email_enabled === true || body.email_enabled === 1 || body.email_enabled === 'true';
+  const daily_digest_enabled = body.daily_digest_enabled === true || body.daily_digest_enabled === 1 || body.daily_digest_enabled === 'true';
+  const alert_due_soon = body.alert_due_soon === true || body.alert_due_soon === 1 || body.alert_due_soon === 'true';
+  const alert_overdue = body.alert_overdue === true || body.alert_overdue === 1 || body.alert_overdue === 'true';
   const email = sanitizeString(body.email || '', 254).toLowerCase();
   if (email_enabled && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return c.json({ error: 'Enter a valid email address to receive digests.' }, 400);
+    return c.json({ error: 'Enter a valid email address to receive MyPlan emails.' }, 400);
   }
-  const daily_digest_time = typeof body.daily_digest_time === 'string' && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(body.daily_digest_time)
+  const submittedDigestTime = typeof body.daily_digest_time === 'string' && /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(body.daily_digest_time)
     ? body.daily_digest_time : null;
-  if (!daily_digest_time) return c.json({ error: 'Choose a valid daily send time.' }, 400);
-  const timezone = sanitizeString(body.timezone || '', 100);
+  if (daily_digest_enabled && !submittedDigestTime) return c.json({ error: 'Choose a valid daily send time.' }, 400);
+  const daily_digest_time = submittedDigestTime || '08:00';
+  const timezone = sanitizeString(body.timezone || 'UTC', 100);
   try { new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format(new Date()); }
   catch { return c.json({ error: 'Choose a valid time zone.' }, 400); }
 
@@ -1387,12 +1670,15 @@ app.put('/api/notifications/preferences', async (c) => {
 
   const statements = [c.env.DB.prepare(`
     INSERT INTO user_email_preferences (
-      user_id, email, email_enabled, daily_digest_time, timezone,
+      user_id, email, email_enabled, daily_digest_enabled, alert_due_soon, alert_overdue, daily_digest_time, timezone,
       include_overdue, lookahead_days, include_undated_open, weekend_delivery, holiday_delivery, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
     ON CONFLICT(user_id) DO UPDATE SET
       email = excluded.email,
       email_enabled = excluded.email_enabled,
+      daily_digest_enabled = excluded.daily_digest_enabled,
+      alert_due_soon = excluded.alert_due_soon,
+      alert_overdue = excluded.alert_overdue,
       daily_digest_time = excluded.daily_digest_time,
       timezone = excluded.timezone,
       include_overdue = excluded.include_overdue,
@@ -1401,7 +1687,8 @@ app.put('/api/notifications/preferences', async (c) => {
       weekend_delivery = excluded.weekend_delivery,
       holiday_delivery = excluded.holiday_delivery,
       updated_at = CURRENT_TIMESTAMP
-  `).bind(user.id, email || null, email_enabled ? 1 : 0, daily_digest_time, timezone,
+  `).bind(user.id, email || null, email_enabled ? 1 : 0, daily_digest_enabled ? 1 : 0,
+    alert_due_soon ? 1 : 0, alert_overdue ? 1 : 0, daily_digest_time, timezone,
     include_overdue, lookahead_days, include_undated_open, weekend_delivery, holiday_delivery)];
   if (projectPreferences) {
     statements.push(c.env.DB.prepare('DELETE FROM user_project_email_preferences WHERE user_id = ?').bind(user.id));
@@ -2511,6 +2798,7 @@ export default {
   async scheduled(controller, env) {
     const scheduledAt = Number(controller?.scheduledTime) || Date.now();
     const stats = await runDailyDigestSchedule(env, new Date(scheduledAt));
-    console.log('Daily digest schedule completed:', JSON.stringify(stats));
+    const alertStats = await runTaskEmailAlertSchedule(env, new Date(scheduledAt));
+    console.log('Email schedule completed:', JSON.stringify({ digest: stats, taskAlerts: alertStats }));
   }
 };
