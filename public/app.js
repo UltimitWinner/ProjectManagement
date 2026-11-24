@@ -90,7 +90,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 function setupEventListeners() {
   document.getElementById('btnToggleProjectsSidebar').addEventListener('click', toggleProjectsSidebar);
-  document.getElementById('btnToggleTheme').addEventListener('click', toggleTheme);
+  document.querySelectorAll('[data-theme-toggle]').forEach(button => button.addEventListener('click', toggleTheme));
   const topbarMoreActions = document.querySelector('.topbar-more-actions');
   topbarMoreActions.querySelectorAll('button').forEach(button => {
     button.addEventListener('click', () => { topbarMoreActions.open = false; });
@@ -648,10 +648,11 @@ function toggleTheme() {
 function setTheme(theme, persist) {
   const isLight = theme === 'light';
   document.documentElement.dataset.theme = isLight ? 'light' : 'dark';
-  const button = document.getElementById('btnToggleTheme');
-  button.textContent = isLight ? 'Dark mode' : 'Light mode';
-  button.setAttribute('aria-pressed', String(isLight));
-  button.setAttribute('aria-label', isLight ? 'Switch to dark mode' : 'Switch to light mode');
+  document.querySelectorAll('[data-theme-toggle]').forEach(button => {
+    button.textContent = isLight ? 'Dark mode' : 'Light mode';
+    button.setAttribute('aria-pressed', String(isLight));
+    button.setAttribute('aria-label', isLight ? 'Switch to dark mode' : 'Switch to light mode');
+  });
   if (persist) {
     try { localStorage.setItem('myplan_theme', isLight ? 'light' : 'dark'); } catch {}
   }

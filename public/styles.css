@@ -522,10 +522,6 @@ body {
   display: none;
 }
 
-.topbar-more-actions > button {
-  display: inline-flex;
-}
-
 .data-transfer-body {
   display: grid;
   gap: 1rem;
@@ -2418,6 +2414,10 @@ textarea:focus {
     gap: 0.35rem;
     overflow: visible;
     padding: 0;
+  }
+
+  .theme-toggle-desktop {
+    display: none;
   }
 
   #btnAddTask {
