@@ -1025,13 +1025,27 @@ async function initializeTables(db) {
   ]) {
     try { await db.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`).run(); } catch (e) { }
   }
-  await db.prepare('CREATE INDEX IF NOT EXISTS idx_tasks_due_alert_lookup ON tasks(due_date, status, project_id, due_time)').run();
+  await db.batch([
+    db.prepare('CREATE INDEX IF NOT EXISTS idx_tasks_due_alert_lookup ON tasks(due_date, status, project_id, due_time)'),
+    db.prepare('CREATE INDEX IF NOT EXISTS idx_tasks_project_order ON tasks(project_id, sort_order, start_date, created_at)'),
+    db.prepare('CREATE INDEX IF NOT EXISTS idx_folders_project_parent_order ON folders(project_id, parent_id, sort_order, created_at)'),
+    db.prepare('CREATE INDEX IF NOT EXISTS idx_custom_fields_project_created ON custom_fields(project_id, created_at)'),
+    db.prepare('CREATE INDEX IF NOT EXISTS idx_project_members_user_project ON project_members(user_id, project_id, access_level)'),
+    db.prepare('CREATE INDEX IF NOT EXISTS idx_task_dependencies_depends_on ON task_dependencies(depends_on_task_id, task_id)'),
+    db.prepare('CREATE INDEX IF NOT EXISTS idx_task_custom_values_field_task ON task_custom_values(custom_field_id, task_id)'),
+    db.prepare('CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)')
+  ]);
 }
 
 // STRICT AUTHENTICATION: Returns user object or null
+const bootstrapReadyDatabases = new WeakSet();
 async function ensureBootstrapUser(db, env) {
+  if (bootstrapReadyDatabases.has(db)) return false;
   const bootstrapCompleted = await db.prepare("SELECT value FROM app_settings WHERE key = 'bootstrap_completed'").first();
-  if (bootstrapCompleted) return false;
+  if (bootstrapCompleted) {
+    bootstrapReadyDatabases.add(db);
+    return false;
+  }
 
   const username = typeof env.BOOTSTRAP_USERNAME === 'string' ? env.BOOTSTRAP_USERNAME.trim().slice(0, 80) : '';
   const password = typeof env.BOOTSTRAP_PASSWORD === 'string' ? env.BOOTSTRAP_PASSWORD : '';
@@ -1054,6 +1068,7 @@ async function ensureBootstrapUser(db, env) {
         system_role = 'admin'`).bind(id, username, passwordHash, salt, name),
     db.prepare("INSERT OR IGNORE INTO app_settings (key, value) VALUES ('bootstrap_completed', '1')")
   ]);
+  bootstrapReadyDatabases.add(db);
   return true;
 }
 
@@ -2006,6 +2021,66 @@ app.get('/api/projects/:id', async (c) => {
   return c.json({ ...project, user_access_level: access });
 });
 
+function projectTasksStatement(db, projectId) {
+  return db.prepare(`
+    SELECT t.*,
+      COALESCE((SELECT json_group_array(td.depends_on_task_id)
+        FROM task_dependencies td WHERE td.task_id = t.id), '[]') AS dependencies_json,
+      COALESCE((SELECT json_group_object(tcv.custom_field_id, tcv.value)
+        FROM task_custom_values tcv WHERE tcv.task_id = t.id), '{}') AS custom_values_json
+    FROM tasks t
+    WHERE t.project_id = ?
+    ORDER BY CASE WHEN t.sort_order IS NULL THEN 1 ELSE 0 END,
+      t.sort_order ASC, t.start_date ASC, t.created_at ASC
+  `).bind(projectId);
+}
+
+function mapProjectTaskRows(rows = []) {
+  return rows.map(task => {
+    let dependencies = [];
+    let customValues = {};
+    try { dependencies = JSON.parse(task.dependencies_json || '[]'); } catch { }
+    try { customValues = JSON.parse(task.custom_values_json || '{}'); } catch { }
+    const { dependencies_json, custom_values_json, ...taskData } = task;
+    return { ...taskData, dependencies, custom_values: customValues };
+  });
+}
+
+function mapProjectFieldRows(rows = []) {
+  return rows.map(field => {
+    let options = [];
+    try { options = JSON.parse(field.options_json || '[]'); } catch { }
+    return { ...field, options };
+  });
+}
+
+app.get('/api/projects/:id/workspace', async (c) => {
+  const user = await getAuthenticatedUser(c);
+  if (!user) return c.json({ error: 'Authentication required' }, 401);
+
+  const db = c.env.DB;
+  const projectId = c.req.param('id');
+  const access = await getProjectAccessLevel(db, projectId, user);
+  if (!verifyProjectPermission(access, 'view')) return c.json({ error: 'Access denied' }, 403);
+
+  const results = await db.batch([
+    db.prepare('SELECT * FROM projects WHERE id = ?').bind(projectId),
+    db.prepare(`SELECT * FROM folders WHERE project_id = ?
+      ORDER BY CASE WHEN sort_order IS NULL THEN 1 ELSE 0 END, sort_order ASC, created_at ASC`).bind(projectId),
+    db.prepare('SELECT * FROM custom_fields WHERE project_id = ? ORDER BY created_at ASC').bind(projectId),
+    projectTasksStatement(db, projectId)
+  ]);
+  const project = results[0]?.results?.[0];
+  if (!project) return c.json({ error: 'Project not found' }, 404);
+
+  return c.json({
+    project: { ...project, user_access_level: access },
+    folders: results[1]?.results || [],
+    customFields: mapProjectFieldRows(results[2]?.results || []),
+    tasks: mapProjectTaskRows(results[3]?.results || [])
+  });
+});
+
 app.put('/api/projects/:id', async (c) => {
   const user = await getAuthenticatedUser(c);
   if (!user) return c.json({ error: 'Authentication required' }, 401);
@@ -2465,41 +2540,8 @@ app.get('/api/projects/:id/tasks', async (c) => {
   const access = await getProjectAccessLevel(db, projectId, user);
   if (!verifyProjectPermission(access, 'view')) return c.json({ error: 'Access denied' }, 403);
 
-  const { results: tasks } = await db.prepare(`
-    SELECT * FROM tasks WHERE project_id = ?
-    ORDER BY CASE WHEN sort_order IS NULL THEN 1 ELSE 0 END, sort_order ASC, start_date ASC, created_at ASC
-  `).bind(projectId).all();
-  const { results: deps } = await db.prepare(`
-    SELECT td.* FROM task_dependencies td
-    JOIN tasks t ON td.task_id = t.id
-    WHERE t.project_id = ?
-  `).bind(projectId).all();
-
-  const { results: customVals } = await db.prepare(`
-    SELECT tcv.* FROM task_custom_values tcv
-    JOIN tasks t ON tcv.task_id = t.id
-    WHERE t.project_id = ?
-  `).bind(projectId).all();
-
-  const dependenciesByTask = new Map();
-  for (const dep of deps || []) {
-    if (!dependenciesByTask.has(dep.task_id)) dependenciesByTask.set(dep.task_id, []);
-    dependenciesByTask.get(dep.task_id).push(dep.depends_on_task_id);
-  }
-  const customValuesByTask = new Map();
-  for (const value of customVals || []) {
-    if (!customValuesByTask.has(value.task_id)) customValuesByTask.set(value.task_id, {});
-    customValuesByTask.get(value.task_id)[value.custom_field_id] = value.value;
-  }
-  const taskMap = (tasks || []).map(task => {
-    return {
-      ...task,
-      dependencies: dependenciesByTask.get(task.id) || [],
-      custom_values: customValuesByTask.get(task.id) || {}
-    };
-  });
-
-  return c.json(taskMap);
+  const { results } = await projectTasksStatement(db, projectId).all();
+  return c.json(mapProjectTaskRows(results || []));
 });
 
 app.patch('/api/projects/:id/tasks/order', async (c) => {
@@ -2594,6 +2636,135 @@ app.post('/api/projects/:id/tasks/bulk-delete', async (c) => {
   return c.json({ success: true, deleted: taskIds.length });
 });
 
+function prepareTaskInsert(db, projectId, body, id) {
+  const repeat = normalizeRepeatRule(body);
+  if (!repeat.valid) return { error: repeat.error };
+  const title = sanitizeString(body.title || 'Untitled Task', 200);
+  const description = sanitizeString(body.description || '', 2000);
+  const folderId = sanitizeString(body.folder_id || '', 50);
+  const status = ['todo', 'in_progress', 'done'].includes(body.status) ? body.status : 'todo';
+  const priority = ['none', 'low', 'medium', 'high', 'urgent'].includes(body.priority) ? body.priority : 'medium';
+  const progress = Math.max(0, Math.min(100, Number(body.progress) || 0));
+  const extraCredit = body.extra_credit === true || body.extra_credit === 1 || body.extra_credit === '1' || body.extra_credit === 'true' ? 1 : 0;
+  const neverDrop = body.never_drop === true || body.never_drop === 1 || body.never_drop === '1' || body.never_drop === 'true' ? 1 : 0;
+  return {
+    title,
+    description,
+    statement: db.prepare(`
+      INSERT INTO tasks (id, project_id, folder_id, title, description, status, status_label, priority, start_date, due_date, start_time, due_time, open_at, progress, color, earned_points, max_points, grade, weight_override, extra_credit, never_drop, repeat_frequency, repeat_interval, repeat_until)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      id, projectId, folderId, title, description, status, sanitizeString(body.status_label || '', 60), priority,
+      body.start_date || null, body.due_date || null, normalizeTime(body.start_time), normalizeTime(body.due_time),
+      normalizeLocalDateTime(body.open_at), progress, sanitizeString(body.color || '', 20),
+      body.earned_points !== undefined && body.earned_points !== '' && body.earned_points !== null ? Number(body.earned_points) : null,
+      body.max_points !== undefined && body.max_points !== '' && body.max_points !== null ? Number(body.max_points) : null,
+      body.grade !== undefined && body.grade !== '' && body.grade !== null ? Number(body.grade) : null,
+      body.weight_override !== undefined && body.weight_override !== '' && body.weight_override !== null ? Number(body.weight_override) : null,
+      extraCredit, neverDrop, repeat.frequency, repeat.interval, repeat.until
+    )
+  };
+}
+
+function appendTaskRelatedWrites(db, taskId, body, statements) {
+  if (Array.isArray(body.dependencies)) {
+    for (const dependencyId of body.dependencies) {
+      if (dependencyId && dependencyId !== taskId) {
+        const dependencyKey = 'dep-' + generateSalt().substring(0, 8);
+        statements.push(db.prepare('INSERT OR IGNORE INTO task_dependencies (id, task_id, depends_on_task_id) VALUES (?, ?, ?)')
+          .bind(dependencyKey, taskId, dependencyId));
+      }
+    }
+  }
+  if (body.custom_values && typeof body.custom_values === 'object' && !Array.isArray(body.custom_values)) {
+    for (const [fieldId, value] of Object.entries(body.custom_values)) {
+      if (value !== undefined && value !== null) {
+        statements.push(db.prepare('INSERT OR REPLACE INTO task_custom_values (task_id, custom_field_id, value) VALUES (?, ?, ?)')
+          .bind(taskId, fieldId, sanitizeString(String(value), 500)));
+      }
+    }
+  }
+}
+
+app.post('/api/projects/:id/tasks/bulk-create', async (c) => {
+  const user = await getAuthenticatedUser(c);
+  if (!user) return c.json({ error: 'Authentication required' }, 401);
+
+  const db = c.env.DB;
+  const projectId = c.req.param('id');
+  const access = await getProjectAccessLevel(db, projectId, user);
+  if (!verifyProjectPermission(access, 'edit')) return c.json({ error: 'Requires edit permission on project' }, 403);
+
+  let body;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON payload' }, 400); }
+  const taskBodies = body?.tasks;
+  if (!Array.isArray(taskBodies) || taskBodies.length === 0 || taskBodies.length > 50
+    || taskBodies.some(task => !task || typeof task !== 'object' || Array.isArray(task))) {
+    return c.json({ error: 'tasks must contain 1 to 50 task objects per batch.' }, 400);
+  }
+
+  const tasks = [];
+  const taskStatements = [];
+  const relatedStatements = [];
+  for (const taskBody of taskBodies) {
+    const id = 'task-' + generateSalt().substring(0, 8);
+    const prepared = prepareTaskInsert(db, projectId, taskBody, id);
+    if (prepared.error) return c.json({ error: prepared.error }, 400);
+    tasks.push({ id, title: prepared.title, description: prepared.description });
+    taskStatements.push(prepared.statement);
+    appendTaskRelatedWrites(db, id, taskBody, relatedStatements);
+  }
+
+  const statements = [...taskStatements, ...relatedStatements];
+  for (let index = 0; index < statements.length; index += 50) {
+    await db.batch(statements.slice(index, index + 50));
+  }
+  return c.json({ tasks }, 201);
+});
+
+app.patch('/api/projects/:id/tasks/bulk-dependencies', async (c) => {
+  const user = await getAuthenticatedUser(c);
+  if (!user) return c.json({ error: 'Authentication required' }, 401);
+
+  const db = c.env.DB;
+  const projectId = c.req.param('id');
+  const access = await getProjectAccessLevel(db, projectId, user);
+  if (!verifyProjectPermission(access, 'edit')) return c.json({ error: 'Requires edit permission on project' }, 403);
+
+  let body;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'Invalid JSON payload' }, 400); }
+  const updates = body?.tasks;
+  if (!Array.isArray(updates) || updates.length === 0 || updates.length > 50
+    || updates.some(item => !item || typeof item.task_id !== 'string' || !item.task_id
+      || !Array.isArray(item.dependencies) || item.dependencies.some(id => typeof id !== 'string' || !id))
+    || new Set(updates.map(item => item.task_id)).size !== updates.length) {
+    return c.json({ error: 'tasks must contain 1 to 50 unique task dependency updates.' }, 400);
+  }
+
+  const taskIds = [...new Set(updates.flatMap(item => [item.task_id, ...item.dependencies]))];
+  if (taskIds.length > 500) return c.json({ error: 'A dependency update batch may reference at most 500 tasks.' }, 400);
+  const placeholders = taskIds.map(() => '?').join(',');
+  const { results } = await db.prepare(`SELECT id FROM tasks WHERE project_id = ? AND id IN (${placeholders})`)
+    .bind(projectId, ...taskIds).all();
+  const existingIds = new Set((results || []).map(task => task.id));
+  if (existingIds.size !== taskIds.length) return c.json({ error: 'Every task and dependency must belong to this project.' }, 400);
+
+  const statements = [];
+  for (const item of updates) {
+    statements.push(db.prepare('DELETE FROM task_dependencies WHERE task_id = ?').bind(item.task_id));
+    for (const dependencyId of new Set(item.dependencies)) {
+      if (dependencyId === item.task_id) continue;
+      const dependencyKey = 'dep-' + generateSalt().substring(0, 8);
+      statements.push(db.prepare('INSERT OR IGNORE INTO task_dependencies (id, task_id, depends_on_task_id) VALUES (?, ?, ?)')
+        .bind(dependencyKey, item.task_id, dependencyId));
+    }
+  }
+  for (let index = 0; index < statements.length; index += 50) {
+    await db.batch(statements.slice(index, index + 50));
+  }
+  return c.json({ success: true, updated: updates.length });
+});
+
 app.post('/api/projects/:id/tasks', async (c) => {
   const user = await getAuthenticatedUser(c);
   if (!user) return c.json({ error: 'Authentication required' }, 401);
@@ -2604,69 +2775,15 @@ app.post('/api/projects/:id/tasks', async (c) => {
   if (!verifyProjectPermission(access, 'edit')) return c.json({ error: 'Requires edit permission on project' }, 403);
 
   const body = await c.req.json();
-  const repeat = normalizeRepeatRule(body);
-  if (!repeat.valid) return c.json({ error: repeat.error }, 400);
   const id = 'task-' + generateSalt().substring(0, 8);
-
-  const title = sanitizeString(body.title || 'Untitled Task', 200);
-  const description = sanitizeString(body.description || '', 2000);
-  const folder_id = sanitizeString(body.folder_id || '', 50);
-  const status = ['todo', 'in_progress', 'done'].includes(body.status) ? body.status : 'todo';
-  const priority = ['none', 'low', 'medium', 'high', 'urgent'].includes(body.priority) ? body.priority : 'medium';
-  const progress = Math.max(0, Math.min(100, Number(body.progress) || 0));
-  const extra_credit = body.extra_credit === true || body.extra_credit === 1 || body.extra_credit === '1' || body.extra_credit === 'true' ? 1 : 0;
-  const never_drop = body.never_drop === true || body.never_drop === 1 || body.never_drop === '1' || body.never_drop === 'true' ? 1 : 0;
-
-  await db.prepare(`
-    INSERT INTO tasks (id, project_id, folder_id, title, description, status, status_label, priority, start_date, due_date, start_time, due_time, open_at, progress, color, earned_points, max_points, grade, weight_override, extra_credit, never_drop, repeat_frequency, repeat_interval, repeat_until)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).bind(
-    id,
-    projectId,
-    folder_id,
-    title,
-    description,
-    status,
-    sanitizeString(body.status_label || '', 60),
-    priority,
-    body.start_date || null,
-    body.due_date || null,
-    normalizeTime(body.start_time),
-    normalizeTime(body.due_time),
-    normalizeLocalDateTime(body.open_at),
-    progress,
-    sanitizeString(body.color || '', 20),
-    body.earned_points !== undefined && body.earned_points !== '' && body.earned_points !== null ? Number(body.earned_points) : null,
-    body.max_points !== undefined && body.max_points !== '' && body.max_points !== null ? Number(body.max_points) : null,
-    body.grade !== undefined && body.grade !== '' && body.grade !== null ? Number(body.grade) : null,
-    body.weight_override !== undefined && body.weight_override !== '' && body.weight_override !== null ? Number(body.weight_override) : null,
-    extra_credit,
-    never_drop,
-    repeat.frequency,
-    repeat.interval,
-    repeat.until
-  ).run();
-
+  const prepared = prepareTaskInsert(db, projectId, body, id);
+  if (prepared.error) return c.json({ error: prepared.error }, 400);
+  await prepared.statement.run();
   const relatedWrites = [];
-  if (Array.isArray(body.dependencies)) {
-    for (const depId of body.dependencies) {
-      if (depId && depId !== id) {
-        const depKey = 'dep-' + generateSalt().substring(0, 8);
-        relatedWrites.push(db.prepare('INSERT OR IGNORE INTO task_dependencies (id, task_id, depends_on_task_id) VALUES (?, ?, ?)').bind(depKey, id, depId));
-      }
-    }
-  }
-
-  if (body.custom_values && typeof body.custom_values === 'object') {
-    for (const [cfId, val] of Object.entries(body.custom_values)) {
-      if (val !== undefined && val !== null) {
-        relatedWrites.push(db.prepare('INSERT OR REPLACE INTO task_custom_values (task_id, custom_field_id, value) VALUES (?, ?, ?)').bind(id, cfId, sanitizeString(String(val), 500)));
-      }
-    }
-  }
+  appendTaskRelatedWrites(db, id, body, relatedWrites);
   if (relatedWrites.length) await db.batch(relatedWrites);
 
-  return c.json({ id, ...body, title, description }, 201);
+  return c.json({ id, ...body, title: prepared.title, description: prepared.description }, 201);
 });
 
 app.put('/api/tasks/:id', async (c) => {

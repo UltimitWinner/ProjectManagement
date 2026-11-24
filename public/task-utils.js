@@ -1,11 +1,12 @@
 const STATUS_ORDER = ['todo', 'in_progress', 'done'];
 const PRIORITY_ORDER = ['none', 'low', 'medium', 'high', 'urgent'];
+const folderPathIndexes = new WeakMap();
 
-function sortValue(task, key, folders) {
+function sortValue(task, key, folders, folderPathCache) {
   switch (key) {
     case 'status': return STATUS_ORDER.indexOf(task.status);
     case 'title': return (task.title || '').toLowerCase();
-    case 'folder': return getFolderPath(task.folder_id, folders).toLowerCase();
+    case 'folder': return getFolderPath(task.folder_id, folders, folderPathCache).toLowerCase();
     case 'priority': return PRIORITY_ORDER.indexOf(task.priority);
     case 'start_date': return task.start_date || 'zzzz';
     case 'due_date': return task.due_date || 'zzzz';
@@ -25,17 +26,39 @@ function sortValue(task, key, folders) {
   }
 }
 
-export function getFolderPath(folderId, folders) {
-  const byId = new Map(folders.map(folder => [folder.id, folder]));
-  const names = [];
+export function getFolderPath(folderId, folders, pathCache = null) {
+  if (!folderId) return '';
+  let byId;
+  if (folders instanceof Map) {
+    byId = folders;
+  } else {
+    let indexes = pathCache ? null : folderPathIndexes.get(folders);
+    if (!indexes) {
+      indexes = { byId: new Map(folders.map(folder => [folder.id, folder])), pathCache: pathCache || new Map() };
+      if (!pathCache) folderPathIndexes.set(folders, indexes);
+    }
+    byId = indexes.byId;
+    pathCache ||= indexes.pathCache;
+  }
+  if (pathCache?.has(folderId)) return pathCache.get(folderId);
+  const chain = [];
   const visited = new Set();
   let folder = byId.get(folderId);
+  let prefix = '';
   while (folder && !visited.has(folder.id)) {
+    if (pathCache?.has(folder.id)) {
+      prefix = pathCache.get(folder.id);
+      break;
+    }
     visited.add(folder.id);
-    names.push(folder.name);
+    chain.push(folder);
     folder = byId.get(folder.parent_id);
   }
-  return names.reverse().join(' / ');
+  for (let index = chain.length - 1; index >= 0; index -= 1) {
+    prefix = prefix ? `${prefix} / ${chain[index].name}` : chain[index].name;
+    pathCache?.set(chain[index].id, prefix);
+  }
+  return pathCache?.get(folderId) ?? prefix;
 }
 
 export function buildGanttRows(tasks, folders) {
@@ -200,7 +223,7 @@ export function getNextTaskOccurrence(task, fromDate = localDateValue(new Date()
   const anchorDate = utcDateFromString(anchor);
   if (!anchorDate) return task;
   const excluded = excludedDates instanceof Set ? excludedDates : new Set(excludedDates);
-  const excludedDays = new Set([...excludedWeekdays].map(Number));
+  const excludedDays = excludedWeekdays instanceof Set ? excludedWeekdays : new Set([...excludedWeekdays].map(Number));
   const targetDate = utcDateFromString(fromDate);
   let index = 0;
   if (targetDate && targetDate > anchorDate) {
@@ -235,9 +258,11 @@ export function getNextTaskOccurrence(task, fromDate = localDateValue(new Date()
   return { ...repeatOccurrence(task, last), id: task.id };
 }
 
-export function expandRecurringTasks(tasks, holidays = [], excludedWeekdays = []) {
+export function expandRecurringTasks(tasks, holidays = [], excludedWeekdays = [], visibleRange = null) {
   const holidaySet = holidays instanceof Set ? holidays : new Set(holidays);
-  const excludedDays = new Set([...excludedWeekdays].map(Number));
+  const excludedDays = excludedWeekdays instanceof Set ? excludedWeekdays : new Set([...excludedWeekdays].map(Number));
+  const rangeStart = utcDateFromString(visibleRange?.start);
+  const rangeEnd = utcDateFromString(visibleRange?.end);
   const expanded = [];
   for (const task of tasks) {
     if (!task.repeat_frequency || !task.repeat_until) {
@@ -246,6 +271,32 @@ export function expandRecurringTasks(tasks, holidays = [], excludedWeekdays = []
     }
     const anchor = task.start_date || task.due_date;
     if (!utcDateFromString(anchor)) continue;
+    if (rangeStart && rangeEnd && rangeEnd >= rangeStart) {
+      const anchorTime = utcDateFromString(anchor).getTime();
+      const relatedDates = [task.start_date, task.due_date, task.open_at?.slice(0, 10)]
+        .map(utcDateFromString).filter(Boolean);
+      const lookbackDays = relatedDates.reduce((days, date) => Math.max(days,
+        Math.ceil(Math.abs(date.getTime() - anchorTime) / 86400000)), 0);
+      const firstSearchDate = shiftDateByDays(visibleRange.start, -lookbackDays);
+      let occurrence = getNextTaskOccurrence(task, firstSearchDate, holidaySet, excludedDays);
+      if (occurrence?._recurrenceDate < firstSearchDate) occurrence = null;
+      while (occurrence?._recurrenceDate && occurrence._recurrenceDate <= visibleRange.end) {
+        const occurrenceStart = occurrence.start_date || occurrence.open_at?.slice(0, 10)
+          || occurrence.due_date || occurrence._recurrenceDate;
+        let occurrenceEnd = occurrence.due_date || occurrenceStart;
+        if (occurrence.due_date && occurrence.start_date && occurrence.due_date <= occurrence.start_date) {
+          occurrenceEnd = shiftDateByDays(occurrence.start_date, 1);
+        }
+        if (occurrenceStart <= visibleRange.end && occurrenceEnd >= visibleRange.start) {
+          occurrence.id = `${task.id}__occ__${occurrence._recurrenceDate}`;
+          expanded.push(occurrence);
+        }
+        const previousOccurrenceDate = occurrence._recurrenceDate;
+        occurrence = getNextTaskOccurrence(task, shiftDateByDays(previousOccurrenceDate, 1), holidaySet, excludedDays);
+        if (occurrence?._recurrenceDate <= previousOccurrenceDate) occurrence = null;
+      }
+      continue;
+    }
     let date = anchor;
     for (let count = 0; count < 20000 && date <= task.repeat_until; count += 1) {
       // Project non-working weekdays and holidays are based on the scheduled start date.
@@ -327,6 +378,8 @@ export function ganttCalendarDaysBetween(start, end) {
 
 export function sortTasks(tasks, folders, sortState, statusOptions = {}) {
   if (!sortState.length) return [...tasks];
+  const foldersById = new Map(folders.map(folder => [folder.id, folder]));
+  const folderPathCache = new Map();
   return [...tasks].sort((a, b) => {
     for (const { key, dir } of sortState) {
       if (key === 'status') {
@@ -345,8 +398,8 @@ export function sortTasks(tasks, folders, sortState, statusOptions = {}) {
         if (labelDifference) return dir === 'asc' ? labelDifference : -labelDifference;
         continue;
       }
-      const va = sortValue(a, key, folders);
-      const vb = sortValue(b, key, folders);
+      const va = sortValue(a, key, foldersById, folderPathCache);
+      const vb = sortValue(b, key, foldersById, folderPathCache);
       if (va === undefined || vb === undefined) continue;
       if (va < vb) return dir === 'asc' ? -1 : 1;
       if (va > vb) return dir === 'asc' ? 1 : -1;
@@ -394,32 +447,67 @@ export function formatCustomFieldValue(field, value) {
   return value;
 }
 
-export function tasksInFolderTree(folderId, folders, tasks) {
+export function buildFolderTaskIndex(folders, tasks) {
+  const foldersById = new Map(folders.map(folder => [folder.id, folder]));
+  const childFoldersByParent = new Map();
+  for (const folder of folders) {
+    const parentId = folder.parent_id || '';
+    if (!childFoldersByParent.has(parentId)) childFoldersByParent.set(parentId, []);
+    childFoldersByParent.get(parentId).push(folder);
+  }
+  const tasksByFolder = new Map();
+  for (const task of tasks) {
+    const folderId = task.folder_id || '';
+    if (!tasksByFolder.has(folderId)) tasksByFolder.set(folderId, []);
+    tasksByFolder.get(folderId).push(task);
+  }
+  return { folders, tasks, foldersById, childFoldersByParent, tasksByFolder };
+}
+
+function childFoldersFor(index, folders, parentId) {
+  return index?.folders === folders
+    ? index.childFoldersByParent.get(parentId || '') || []
+    : folders.filter(folder => (folder.parent_id || '') === (parentId || ''));
+}
+
+function directTasksFor(index, folders, tasks, folderId) {
+  return index?.folders && index.tasks === tasks
+    ? index.tasksByFolder.get(folderId || '') || []
+    : tasks.filter(task => (task.folder_id || '') === (folderId || ''));
+}
+
+export function tasksInFolderTree(folderId, folders, tasks, index = null) {
   const descendantIds = new Set([folderId]);
   const pending = [folderId];
   while (pending.length) {
     const parentId = pending.pop();
-    for (const folder of folders) {
-      if (folder.parent_id === parentId && Number(folder.weight_percent) > 0 && !descendantIds.has(folder.id)) {
+    for (const folder of childFoldersFor(index, folders, parentId)) {
+      if (Number(folder.weight_percent) > 0 && !descendantIds.has(folder.id)) {
         descendantIds.add(folder.id);
         pending.push(folder.id);
       }
     }
   }
+  if (index?.folders === folders && index.tasks === tasks) {
+    return [...descendantIds].flatMap(id => index.tasksByFolder.get(id) || []);
+  }
   return tasks.filter(task => descendantIds.has(task.folder_id));
 }
 
-export function tasksInFolderSubtree(folderId, folders, tasks) {
+export function tasksInFolderSubtree(folderId, folders, tasks, index = null) {
   const folderIds = new Set([folderId]);
   const pending = [folderId];
   while (pending.length) {
     const parentId = pending.pop();
-    for (const folder of folders) {
-      if (folder.parent_id === parentId && !folderIds.has(folder.id)) {
+    for (const folder of childFoldersFor(index, folders, parentId)) {
+      if (!folderIds.has(folder.id)) {
         folderIds.add(folder.id);
         pending.push(folder.id);
       }
     }
+  }
+  if (index?.folders === folders && index.tasks === tasks) {
+    return [...folderIds].flatMap(id => index.tasksByFolder.get(id) || []);
   }
   return tasks.filter(task => folderIds.has(task.folder_id));
 }
@@ -561,16 +649,16 @@ function folderHasDirectWeights(tasks, customWeightFieldId) {
   });
 }
 
-function folderContributingTasks(folderId, folders, tasks, ancestors = new Set(), customWeightFieldId = null) {
+function folderContributingTasks(folderId, folders, tasks, ancestors = new Set(), customWeightFieldId = null, index = null) {
   if (ancestors.has(folderId)) return [];
-  const directTasks = tasks.filter(task => task.folder_id === folderId);
-  const weightedChildren = folders.filter(child => child.parent_id === folderId && Number(child.weight_percent) > 0);
+  const directTasks = directTasksFor(index, folders, tasks, folderId);
+  const weightedChildren = childFoldersFor(index, folders, folderId).filter(child => Number(child.weight_percent) > 0);
   const included = folderHasDirectWeights(directTasks, customWeightFieldId) || weightedChildren.length === 0
     ? [...directTasks]
     : [];
   const nextAncestors = new Set(ancestors);
   nextAncestors.add(folderId);
-  weightedChildren.forEach(child => included.push(...folderContributingTasks(child.id, folders, tasks, nextAncestors, customWeightFieldId)));
+  weightedChildren.forEach(child => included.push(...folderContributingTasks(child.id, folders, tasks, nextAncestors, customWeightFieldId, index)));
   return included;
 }
 
@@ -583,8 +671,8 @@ function inputTaskScore(task) {
   return null;
 }
 
-function bonusFolderScore(folderId, folders, tasks, customWeightFieldId, scenario) {
-  const bonusTasks = tasksInFolderSubtree(folderId, folders, tasks).filter(task => task.extra_credit);
+function bonusFolderScore(folderId, folders, tasks, customWeightFieldId, scenario, index = null) {
+  const bonusTasks = tasksInFolderSubtree(folderId, folders, tasks, index).filter(task => task.extra_credit);
   let totalWeight = 0;
   let earnedWeight = 0;
 
@@ -647,20 +735,20 @@ function scenarioValue(potential, scenario) {
   return scenario === 'maximum' ? potential.maxAverage ?? null : potential.minAverage ?? null;
 }
 
-function folderTreeScenario(folderId, folders, tasks, customWeightFieldId, scenario, ancestors = new Set()) {
+function folderTreeScenario(folderId, folders, tasks, customWeightFieldId, scenario, ancestors = new Set(), index = null) {
   if (ancestors.has(folderId)) return { score: null, droppedTaskIds: new Set() };
-  const folder = folders.find(item => item.id === folderId);
+  const folder = index?.folders === folders ? index.foldersById.get(folderId) : folders.find(item => item.id === folderId);
   if (!folder) {
-    const potential = folderGradePotential(tasks.filter(task => task.folder_id === folderId), customWeightFieldId);
+    const potential = folderGradePotential(directTasksFor(index, folders, tasks, folderId), customWeightFieldId);
     return { score: scenarioValue(potential, scenario), droppedTaskIds: new Set() };
   }
 
-  const contributingTasks = folderContributingTasks(folderId, folders, tasks, new Set(), customWeightFieldId);
+  const contributingTasks = folderContributingTasks(folderId, folders, tasks, new Set(), customWeightFieldId, index);
   const ownDropped = tasksDroppedForScenario(contributingTasks, folder.drop_lowest_count, folder.drop_highest_count, scenario);
   const remainingTasks = ownDropped.size ? tasks.filter(task => !ownDropped.has(task.id)) : tasks;
   if (folder.bonus_cap_enabled) {
     return {
-      score: bonusFolderScore(folderId, folders, remainingTasks, customWeightFieldId, scenario),
+      score: bonusFolderScore(folderId, folders, remainingTasks, customWeightFieldId, scenario, index),
       droppedTaskIds: ownDropped
     };
   }
@@ -668,10 +756,10 @@ function folderTreeScenario(folderId, folders, tasks, customWeightFieldId, scena
     return { score: 100, droppedTaskIds: ownDropped };
   }
 
-  const directTasks = remainingTasks.filter(task => task.folder_id === folderId);
+  const directTasks = directTasksFor(index, folders, remainingTasks, folderId);
   const directPotential = folderGradePotential(directTasks, customWeightFieldId);
   const hasDirectWeights = folderHasDirectWeights(directTasks, customWeightFieldId);
-  const weightedChildren = folders.filter(child => child.parent_id === folderId && Number(child.weight_percent) > 0);
+  const weightedChildren = childFoldersFor(index, folders, folderId).filter(child => Number(child.weight_percent) > 0);
   if (!hasDirectWeights && weightedChildren.length === 0) {
     return { score: scenarioValue(directPotential, scenario), droppedTaskIds: ownDropped };
   }
@@ -690,7 +778,7 @@ function folderTreeScenario(folderId, folders, tasks, customWeightFieldId, scena
   nextAncestors.add(folderId);
   const droppedTaskIds = new Set(ownDropped);
   for (const child of weightedChildren) {
-    const childResult = folderTreeScenario(child.id, folders, remainingTasks, customWeightFieldId, scenario, nextAncestors);
+    const childResult = folderTreeScenario(child.id, folders, remainingTasks, customWeightFieldId, scenario, nextAncestors, index);
     childResult.droppedTaskIds.forEach(id => droppedTaskIds.add(id));
     const childScore = childResult.score === null && scenario === 'current' ? 100 : childResult.score;
     if (childScore !== null) {
@@ -702,11 +790,11 @@ function folderTreeScenario(folderId, folders, tasks, customWeightFieldId, scena
   return { score: hasScore ? score : null, droppedTaskIds };
 }
 
-export function folderTreeGradePotential(folderId, folders, tasks, customWeightFieldId = null) {
-  const current = folderTreeScenario(folderId, folders, tasks, customWeightFieldId, 'current');
-  const maximum = folderTreeScenario(folderId, folders, tasks, customWeightFieldId, 'maximum');
-  const minimum = folderTreeScenario(folderId, folders, tasks, customWeightFieldId, 'minimum');
-  const contributingTasks = folderContributingTasks(folderId, folders, tasks, new Set(), customWeightFieldId);
+export function folderTreeGradePotential(folderId, folders, tasks, customWeightFieldId = null, index = null) {
+  const current = folderTreeScenario(folderId, folders, tasks, customWeightFieldId, 'current', new Set(), index);
+  const maximum = folderTreeScenario(folderId, folders, tasks, customWeightFieldId, 'maximum', new Set(), index);
+  const minimum = folderTreeScenario(folderId, folders, tasks, customWeightFieldId, 'minimum', new Set(), index);
+  const contributingTasks = folderContributingTasks(folderId, folders, tasks, new Set(), customWeightFieldId, index);
   const gradedCount = contributingTasks.filter(task => inputTaskScore(task) !== null).length;
   return {
     average: current.score,

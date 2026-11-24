@@ -1,4 +1,4 @@
-import { sortTasks, excludeDoneTasks, buildGanttDependencyEdges, ganttDependencyPath, taskCustomFieldEntries, formatCustomFieldValue, getFolderPath, buildGanttRows, buildGanttWeekRanges, taskGanttDateRange, ganttTimeOffset, ganttCalendarDaysBetween, folderTreeGradePotential, pointsGradeProjection, weightedGradeContribution, currentGradeWithUngradedFolderDefault, tasksInFolderTree, tasksInFolderSubtree, getNextTaskOccurrence, expandRecurringTasks } from './task-utils.js';
+import { sortTasks, excludeDoneTasks, buildGanttDependencyEdges, ganttDependencyPath, taskCustomFieldEntries, formatCustomFieldValue, getFolderPath, buildGanttRows, buildGanttWeekRanges, taskGanttDateRange, ganttTimeOffset, ganttCalendarDaysBetween, folderTreeGradePotential, pointsGradeProjection, weightedGradeContribution, currentGradeWithUngradedFolderDefault, buildFolderTaskIndex, tasksInFolderTree, tasksInFolderSubtree, getNextTaskOccurrence, expandRecurringTasks } from './task-utils.js';
 import { parseCsv, serializeCsv, detectCsvProfile, normalizeImportRow, normalizeHeader, getCsvProfile, parseTransferDateValue, parseTransferTimeValue } from './transfer-utils.js';
 import { parseLearningSuiteHtml, previewLearningSuiteMatches, normalizeTaskMatchTitle } from './learning-suite-utils.js';
 import { canvasCourseToBackup, canvasCourseLabel, parseCanvasAssignmentsHtml, detectCanvasAssignmentsHtml } from './canvas-utils.js';
@@ -10,6 +10,7 @@ let projectSelectionVersion = 0;
 let projects = [];
 let currentProjectId = new URLSearchParams(location.search).get('canvas_project') || null;
 let currentProject = null;
+let projectCalendarCache = null;
 let selectedStatsFolderId;
 let folders = []; // All folders & subfolders
 let collapsedFolderIds = new Set();
@@ -1427,6 +1428,18 @@ async function loadProjects() {
   }
 }
 
+async function loadProjectWorkspace(projectId = currentProjectId, selectionVersion = projectSelectionVersion, render = true) {
+  const workspace = await api(`/api/projects/${projectId}/workspace`);
+  if (projectId !== currentProjectId || selectionVersion !== projectSelectionVersion) return false;
+  currentProject = { ...currentProject, ...workspace.project };
+  currentProjectAccess = workspace.project.user_access_level || 'none';
+  folders = workspace.folders || [];
+  customFields = workspace.customFields || [];
+  tasks = workspace.tasks || [];
+  if (render) renderCurrentView();
+  return true;
+}
+
 async function selectProject(id) {
   const selectionVersion = ++projectSelectionVersion;
   const projectChanged = currentProjectId !== id;
@@ -1449,11 +1462,10 @@ async function selectProject(id) {
 
   if (projectChanged) renderCurrentView();
 
-  // Retrieve project details and verified user access level for this specific project
+  // Load the project and its view data in one authorized workspace request.
   try {
-    const projDetail = await api(`/api/projects/${id}`);
-    if (selectionVersion !== projectSelectionVersion || currentProjectId !== id) return;
-    currentProjectAccess = projDetail.user_access_level || 'none';
+    const loaded = await loadProjectWorkspace(id, selectionVersion, false);
+    if (!loaded) return;
   } catch {
     if (selectionVersion !== projectSelectionVersion || currentProjectId !== id) return;
     currentProjectAccess = 'none';
@@ -1520,11 +1532,7 @@ async function selectProject(id) {
   }
 
   renderSidebarProjects();
-  await loadFolders(id, selectionVersion);
-  if (selectionVersion !== projectSelectionVersion || currentProjectId !== id) return;
-  await loadCustomFields(id, selectionVersion);
-  if (selectionVersion !== projectSelectionVersion || currentProjectId !== id) return;
-  await loadTasks(id, selectionVersion);
+  renderCurrentView();
 }
 
 function updateProjectPermissionsButton() {
@@ -1578,7 +1586,10 @@ function renderCurrentView() {
   document.getElementById('folderViewTabLabel').textContent = hasGrades ? 'Folders & Grades' : 'Folders';
   document.querySelector('.grade-cards-grid').classList.toggle('completion-only', !hasGrades);
   document.querySelectorAll('.grade-info-card').forEach(element => element.classList.toggle('hidden', !hasGrades));
-  if (currentView !== 'folder') calculateFolderTreeGrades();
+  if (currentView !== 'folder') {
+    if (hasGrades) calculateFolderTreeGrades();
+    else currentDroppedGradeTaskIds = new Set();
+  }
 
   folderView.classList.remove('active');
   boardView.classList.remove('active');
@@ -2143,6 +2154,7 @@ async function importTasks() {
     const folderCache = [...folders];
     const sourceTaskIdMap = new Map();
     const tasksToLink = [];
+    const tasksToCreate = [];
     const claimedExistingTaskIds = new Set();
     for (const row of normalizedRows) {
       const path = row.folder_path || row.folder || row.bucket_name || row.bucket || row.group || row.list_name || row.list || '';
@@ -2226,29 +2238,44 @@ async function importTasks() {
         };
         await api(`/api/tasks/${existing.id}`, { method: 'PUT', body: JSON.stringify(updatePayload) });
         updatedCount += 1;
-        if (sourceId) syncMap.tasks[String(sourceId)] = existing.id;
-      } else {
-        const created = await api(`/api/projects/${currentProjectId}/tasks`, { method: 'POST', body: JSON.stringify(payload) });
-        createdCount += 1;
         if (sourceId) {
-          sourceTaskIdMap.set(String(sourceId), created.id);
-          if (isExternalSync) syncMap.tasks[String(sourceId)] = created.id;
+          sourceTaskIdMap.set(String(sourceId), existing.id);
+          syncMap.tasks[String(sourceId)] = existing.id;
         }
-        tasksToLink.push({ id: created.id, payload, sourceDependencies: row._sourceDependencies || payload._sourceDependencies || [] });
+      } else {
+        tasksToCreate.push({ sourceId, payload, sourceDependencies: row._sourceDependencies || payload._sourceDependencies || [] });
       }
       if (isExternalSync) saveLearningSuiteSyncMap(learningSuiteCourseId, syncMap, syncSource);
-      preview.textContent = `Processed ${createdCount + updatedCount} of ${normalizedRows.length} assignments (${createdCount} added, ${updatedCount} updated).`;
+      preview.textContent = `Processed ${createdCount + updatedCount + tasksToCreate.length} of ${normalizedRows.length} assignments (${createdCount + tasksToCreate.length} added, ${updatedCount} updated).`;
     }
 
-    for (const item of tasksToLink) {
-      const dependencies = item.sourceDependencies.map(value => sourceTaskIdMap.get(String(value))).filter(Boolean);
-      if (dependencies.length) {
-        await api(`/api/tasks/${item.id}`, { method: 'PUT', body: JSON.stringify({ ...item.payload, dependencies }) });
-      }
+    for (let index = 0; index < tasksToCreate.length; index += 50) {
+      const batch = tasksToCreate.slice(index, index + 50);
+      const result = await api(`/api/projects/${currentProjectId}/tasks/bulk-create`, {
+        method: 'POST', body: JSON.stringify({ tasks: batch.map(item => item.payload) })
+      });
+      result.tasks.forEach((created, batchIndex) => {
+        const item = batch[batchIndex];
+        createdCount += 1;
+        if (item.sourceId) {
+          sourceTaskIdMap.set(String(item.sourceId), created.id);
+          if (isExternalSync) syncMap.tasks[String(item.sourceId)] = created.id;
+        }
+        tasksToLink.push({ id: created.id, sourceDependencies: item.sourceDependencies });
+      });
     }
-    await loadFolders();
-    await loadCustomFields();
-    await loadTasks();
+    if (isExternalSync && tasksToCreate.length) saveLearningSuiteSyncMap(learningSuiteCourseId, syncMap, syncSource);
+
+    const dependencyUpdates = tasksToLink.map(item => ({
+      task_id: item.id,
+      dependencies: item.sourceDependencies.map(value => sourceTaskIdMap.get(String(value))).filter(Boolean)
+    })).filter(item => item.dependencies.length > 0);
+    for (let index = 0; index < dependencyUpdates.length; index += 50) {
+      await api(`/api/projects/${currentProjectId}/tasks/bulk-dependencies`, {
+        method: 'PATCH', body: JSON.stringify({ tasks: dependencyUpdates.slice(index, index + 50) })
+      });
+    }
+    await loadProjectWorkspace();
     preview.textContent = isLearningSuite
       ? `Learning Suite import complete: ${createdCount} task(s) added, ${updatedCount} updated, ${updatedFolderCount} category folder(s) refreshed${ambiguousCount ? `, ${ambiguousCount} ambiguous match(es) skipped` : ''}.`
       : isCanvas
@@ -2391,7 +2418,8 @@ function renderFolderView() {
   const container = document.getElementById('folderTreeContainer');
   container.innerHTML = '';
 
-  const rootFolders = folders.filter(folder => !folder.parent_id);
+  const folderIndex = buildFolderTaskIndex(folders, tasks);
+  const rootFolders = folderIndex.childFoldersByParent.get('') || [];
   const hasGradedFolders = hasGradedCategories();
   document.getElementById('folderViewTabLabel').textContent = hasGradedFolders ? 'Folders & Grades' : 'Folders';
   document.querySelector('.grade-cards-grid').classList.toggle('completion-only', !hasGradedFolders);
@@ -2404,14 +2432,16 @@ function renderFolderView() {
     .map(folder => `<option value="${escapeHtml(folder.id)}">${escapeHtml(folder.name)}</option>`).join('');
   scopeSelect.value = selectedStatsFolderId || '';
 
-  const gradeData = calculateFolderTreeGrades(selectedStatsFolderId);
+  const gradeData = hasGradedFolders
+    ? calculateFolderTreeGrades(selectedStatsFolderId, folderIndex)
+    : calculateFolderTaskCounts(folderIndex);
 
   // Summary Metrics
   document.getElementById('valCurrentGrade').textContent = gradeData.currentGrade !== '--' ? `${gradeData.currentGrade}%` : '--';
   document.getElementById('valMaxGrade').textContent = `${gradeData.maxGrade}%`;
   document.getElementById('valMinGrade').textContent = `${gradeData.minGrade}%`;
 
-  const scopedTasks = selectedStatsFolderId ? tasksInFolderSubtree(selectedStatsFolderId, folders, tasks) : tasks;
+  const scopedTasks = selectedStatsFolderId ? tasksInFolderSubtree(selectedStatsFolderId, folders, tasks, folderIndex) : tasks;
   const totalTasks = scopedTasks.length;
   const doneTasks = scopedTasks.filter(task => task.status === 'done').length;
   const progressPct = totalTasks > 0 ? Math.round((doneTasks / totalTasks) * 100) : 0;
@@ -2439,12 +2469,12 @@ function renderFolderView() {
 
   // Render each root folder with its nested subfolders
   rootFolders.forEach(root => {
-    const rootBlock = renderFolderNode(root, 0, gradeData);
+    const rootBlock = renderFolderNode(root, 0, gradeData, folderIndex);
     container.appendChild(rootBlock);
   });
 
   // Render Unassigned / General tasks if any
-  const unassignedTasks = tasks.filter(t => !t.folder_id);
+  const unassignedTasks = folderIndex.tasksByFolder.get('') || [];
   if (unassignedTasks.length > 0) {
     const generalBlock = document.createElement('div');
     generalBlock.className = 'folder-node root-folder';
@@ -2467,7 +2497,20 @@ function renderFolderView() {
   updateBulkDeleteControls();
 }
 
-function renderFolderNode(folder, depth, gradeData) {
+function calculateFolderTaskCounts(folderIndex) {
+  currentDroppedGradeTaskIds = new Set();
+  const folderStats = new Map();
+  folders.forEach(folder => {
+    folderStats.set(folder.id, {
+      avg: '--', average: null, maxAverage: null, minAverage: null,
+      weight: Number(folder.weight_percent) || 0, gradedCount: 0,
+      totalCount: tasksInFolderTree(folder.id, folders, tasks, folderIndex).length
+    });
+  });
+  return { currentGrade: '--', maxGrade: '--', minGrade: '--', folderStats };
+}
+
+function renderFolderNode(folder, depth, gradeData, folderIndex) {
   const node = document.createElement('div');
   node.dataset.folderId = folder.id;
   const isRoot = depth === 0;
@@ -2478,9 +2521,9 @@ function renderFolderNode(folder, depth, gradeData) {
   const folderIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>';
 
   // Subfolders belonging to this folder
-  const subfolders = folders.filter(f => f.parent_id === folder.id);
+  const subfolders = folderIndex.childFoldersByParent.get(folder.id) || [];
   // Tasks directly inside this folder
-  const folderTasks = tasks.filter(t => t.folder_id === folder.id);
+  const folderTasks = folderIndex.tasksByFolder.get(folder.id) || [];
 
   const folderStats = gradeData.folderStats.get(folder.id) || { avg: '--', earnedRate: 0, weight: folder.weight_percent, totalCount: folderTasks.length };
 
@@ -2554,7 +2597,7 @@ function renderFolderNode(folder, depth, gradeData) {
 
   // Render nested subfolders recursively
   subfolders.forEach(sub => {
-    contentArea.appendChild(renderFolderNode(sub, depth + 1, gradeData));
+    contentArea.appendChild(renderFolderNode(sub, depth + 1, gradeData, folderIndex));
   });
 
   return node;
@@ -2752,7 +2795,7 @@ function createTaskTreeRow(task) {
 }
 
 // Grade calculation engine across folders and nested subfolders
-function calculateFolderTreeGrades(scopeFolderId = null) {
+function calculateFolderTreeGrades(scopeFolderId = null, folderIndex = buildFolderTaskIndex(folders, tasks)) {
   const folderStats = new Map();
   const assignmentWeightFieldId = customFields.find(field => /\bweight\b/i.test(field.name))?.id || null;
   currentDroppedGradeTaskIds = new Set();
@@ -2763,8 +2806,8 @@ function calculateFolderTreeGrades(scopeFolderId = null) {
 
   // Calculate individual folder averages
   folders.forEach(f => {
-    const fTasks = tasksInFolderTree(f.id, folders, tasks);
-    const potential = folderTreeGradePotential(f.id, folders, tasks, assignmentWeightFieldId);
+    const fTasks = tasksInFolderTree(f.id, folders, tasks, folderIndex);
+    const potential = folderTreeGradePotential(f.id, folders, tasks, assignmentWeightFieldId, folderIndex);
     (potential.droppedTaskIdsCurrent || []).forEach(taskId => currentDroppedGradeTaskIds.add(taskId));
     const { average: avg, minAverage, maxAverage, gradedCount } = potential;
     const weight = Number(f.weight_percent) || 0;
@@ -2781,7 +2824,7 @@ function calculateFolderTreeGrades(scopeFolderId = null) {
   });
 
   if (scopeFolderId) {
-    const potential = folderTreeGradePotential(scopeFolderId, folders, tasks, assignmentWeightFieldId);
+    const potential = folderStats.get(scopeFolderId);
     return {
       currentGrade: currentGradeWithUngradedFolderDefault(potential.average).toFixed(1),
       maxGrade: (potential.maxAverage ?? 0).toFixed(1),
@@ -2798,7 +2841,7 @@ function calculateFolderTreeGrades(scopeFolderId = null) {
     let parentId = folder.parent_id;
     while (parentId && !visited.has(parentId)) {
       visited.add(parentId);
-      const parent = folders.find(item => item.id === parentId);
+      const parent = folderIndex.foldersById.get(parentId);
       if (!parent) break;
       if (Number(parent.weight_percent) > 0) return false;
       parentId = parent.parent_id;
@@ -2834,12 +2877,13 @@ function calculateFolderTreeGrades(scopeFolderId = null) {
 // ----------------- 2. Kanban Board View -----------------
 function renderBoardView() {
   const statuses = ['todo', 'in_progress', 'done'];
+  const sortedByManualOrder = sortTasks(tasks, folders, [{ key: 'manual_order', dir: 'asc' }]);
   statuses.forEach(status => {
     const col = document.getElementById(`tasks-${status}`);
     const countEl = document.getElementById(`count-${status}`);
     col.innerHTML = '';
 
-    const filtered = sortTasks(tasks, folders, [{ key: 'manual_order', dir: 'asc' }]).filter(t => t.status === status);
+    const filtered = sortedByManualOrder.filter(t => t.status === status);
     countEl.textContent = filtered.length;
     const groupName = ({ todo: 'Not Active', in_progress: 'Active', done: 'Completed' })[status];
     const labels = [...new Set([
@@ -2847,12 +2891,18 @@ function renderBoardView() {
       ...filtered.map(task => task.status_label).filter(Boolean)
     ])];
     const bucketCards = new Map();
+    const bucketTasksByLabel = new Map([['', []], ...labels.map(label => [label, []])]);
+    filtered.forEach(task => {
+      const label = task.status_label || '';
+      if (!bucketTasksByLabel.has(label)) bucketTasksByLabel.set(label, []);
+      bucketTasksByLabel.get(label).push(task);
+    });
     [['', groupName], ...labels.map(label => [label, label])].forEach(([statusLabel, labelText]) => {
       const bucket = document.createElement('div');
       bucket.className = 'kanban-status-bucket';
       bucket.dataset.status = status;
       bucket.dataset.statusLabel = statusLabel;
-      const bucketTasks = filtered.filter(task => (task.status_label || '') === statusLabel);
+      const bucketTasks = bucketTasksByLabel.get(statusLabel) || [];
       const bucketHeader = document.createElement('div');
       bucketHeader.className = 'kanban-status-bucket-header';
       const title = document.createElement('span');
@@ -3125,10 +3175,25 @@ function formatTaskDateAndTime(date, time) {
   return date ? `${date}${time ? ` ${time}` : ''}` : '-';
 }
 
+function getProjectCalendar() {
+  const holidaysJson = currentProject?.holidays_json || '[]';
+  const nonWorkingDaysJson = currentProject?.non_working_days_json || '[0,6]';
+  if (projectCalendarCache?.projectId === currentProjectId
+    && projectCalendarCache.holidaysJson === holidaysJson
+    && projectCalendarCache.nonWorkingDaysJson === nonWorkingDaysJson) return projectCalendarCache;
+  projectCalendarCache = {
+    projectId: currentProjectId,
+    holidaysJson,
+    nonWorkingDaysJson,
+    holidays: new Set(parseJsonArray(holidaysJson, [])),
+    nonWorkingDays: new Set(parseJsonArray(nonWorkingDaysJson, [0, 6]).map(Number))
+  };
+  return projectCalendarCache;
+}
+
 function getProjectNextTaskOccurrence(task, fromDate) {
-  const holidays = parseJsonArray(currentProject?.holidays_json, []);
-  const nonWorkingDays = parseJsonArray(currentProject?.non_working_days_json, [0, 6]).map(Number);
-  return getNextTaskOccurrence(task, fromDate, holidays, nonWorkingDays);
+  const calendar = getProjectCalendar();
+  return getNextTaskOccurrence(task, fromDate, calendar.holidays, calendar.nonWorkingDays);
 }
 
 function renderGanttView() {
@@ -3140,13 +3205,42 @@ function renderGanttView() {
   const preferences = getGanttPreferences();
   const yScale = preferences.rowHeight / 42;
   viewport.style.setProperty('--gantt-y-scale', String(yScale));
-  const projectHolidays = new Set(parseJsonArray(currentProject?.holidays_json, []));
-  const projectNonWorkingDays = parseJsonArray(currentProject?.non_working_days_json, [0, 6]).map(Number);
-  const ganttTasks = expandRecurringTasks(
-    sortTasks(excludeDoneTasks(tasks, excludeDoneFromList), folders, listSortState, projectStatusOptions()),
-    projectHolidays,
-    projectNonWorkingDays
-  );
+  const projectCalendar = getProjectCalendar();
+  const projectHolidays = projectCalendar.holidays;
+  const projectNonWorkingDaySet = projectCalendar.nonWorkingDays;
+  const baseGanttTasks = sortTasks(excludeDoneTasks(tasks, excludeDoneFromList), folders, listSortState, projectStatusOptions());
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const todayKey = localDateString(today);
+  const timelineBasis = baseGanttTasks.map(task => task.repeat_frequency
+    ? task.repeat_until && task.repeat_until < todayKey
+      ? null
+      : getNextTaskOccurrence(task, todayKey, projectHolidays, projectNonWorkingDaySet)
+    : task).filter(Boolean);
+  let minDate = new Date(today);
+  let maxDate = new Date(today.getTime() + 30 * 86400000);
+  for (const task of timelineBasis) {
+    const { startDate, dueDate } = taskGanttDateRange(task, today);
+    if (startDate < minDate) minDate = new Date(startDate);
+    if (dueDate > maxDate) maxDate = new Date(dueDate);
+  }
+
+  if (preferences.rangeStart && preferences.rangeEnd && preferences.rangeEnd >= preferences.rangeStart) {
+    minDate = new Date(`${preferences.rangeStart}T00:00:00`);
+    maxDate = new Date(`${preferences.rangeEnd}T00:00:00`);
+    maxDate.setDate(maxDate.getDate() + 1);
+  } else {
+    minDate.setHours(0, 0, 0, 0);
+    maxDate.setHours(0, 0, 0, 0);
+    minDate.setDate(minDate.getDate() - 3);
+    maxDate.setDate(maxDate.getDate() + 8);
+  }
+  const lastVisibleDate = new Date(maxDate);
+  lastVisibleDate.setDate(lastVisibleDate.getDate() - 1);
+  const ganttTasks = expandRecurringTasks(baseGanttTasks, projectHolidays, projectNonWorkingDaySet, {
+    start: localDateString(minDate),
+    end: localDateString(lastVisibleDate)
+  });
   const storedGanttRows = buildGanttRows(ganttTasks, folders);
   const collapsedFolders = new Set(preferences.collapsedFolders);
   const ganttRows = [];
@@ -3176,29 +3270,11 @@ function renderGanttView() {
   barsContainer.innerHTML = '';
   svgLines.innerHTML = '';
 
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-
-  let minDate = new Date(today);
-  let maxDate = new Date(today.getTime() + 30 * 86400000);
   const taskDates = new Map();
   ganttTasks.forEach(task => {
     const { startDate, dueDate } = taskGanttDateRange(task, today);
     taskDates.set(task.id, { startDate, dueDate });
-    if (startDate < minDate) minDate = new Date(startDate);
-    if (dueDate > maxDate) maxDate = new Date(dueDate);
   });
-
-  if (preferences.rangeStart && preferences.rangeEnd && preferences.rangeEnd >= preferences.rangeStart) {
-    minDate = new Date(`${preferences.rangeStart}T00:00:00`);
-    maxDate = new Date(`${preferences.rangeEnd}T00:00:00`);
-    maxDate.setDate(maxDate.getDate() + 1);
-  } else {
-    minDate.setHours(0, 0, 0, 0);
-    maxDate.setHours(0, 0, 0, 0);
-    minDate.setDate(minDate.getDate() - 3);
-    maxDate.setDate(maxDate.getDate() + 8);
-  }
 
   const totalDays = Math.max(1, ganttCalendarDaysBetween(minDate, maxDate));
   const dayWidth = preferences.dayWidth;
@@ -3215,7 +3291,7 @@ function renderGanttView() {
   barsContainer.style.height = `${chartHeight}px`;
   svgLines.style.height = `${chartHeight}px`;
 
-  const nonWorkingDays = parseJsonArray(currentProject?.non_working_days_json, [0, 6]).map(Number);
+  const nonWorkingDays = [...projectNonWorkingDaySet];
   const holidays = projectHolidays;
   for (let i = 0; i < totalDays; i++) {
     const curDate = new Date(minDate);
@@ -3816,8 +3892,7 @@ async function handleSaveFolder(e) {
       await api(`/api/projects/${currentProjectId}/folders`, { method: 'POST', body: JSON.stringify(payload) });
     }
     folderModal.classList.add('hidden');
-    await loadFolders();
-    await loadTasks();
+    await loadProjectWorkspace();
   } catch (err) {
     alert('Failed to save folder: ' + err.message);
   }
@@ -3830,8 +3905,7 @@ async function handleDeleteFolder() {
   try {
     await api(`/api/folders/${folderId}`, { method: 'DELETE' });
     folderModal.classList.add('hidden');
-    await loadFolders();
-    await loadTasks();
+    await loadProjectWorkspace();
   } catch (err) {
     alert('Failed to delete folder: ' + err.message);
   }
@@ -4288,9 +4362,8 @@ window.handleDeleteField = async (fieldId) => {
   if (!confirm('Are you sure you want to delete this custom field?')) return;
   try {
     await api(`/api/fields/${fieldId}`, { method: 'DELETE' });
-    await loadCustomFields();
+    await loadProjectWorkspace();
     renderFieldsList();
-    await loadTasks();
   } catch (err) {
     alert('Failed to delete custom field: ' + err.message);
   }
