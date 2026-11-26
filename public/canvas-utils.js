@@ -125,9 +125,10 @@ export function canvasCourseLabel(course) {
 
 export function detectCanvasAssignmentsHtml(markup) {
   const text = String(markup || '');
-  return /\/courses\/\d+\/assignments\/\d+/i.test(text)
+  return /\/courses\/\d+\/(?:assignments|grades)(?:\/|["'?])/i.test(text)
     && /<table\b[\s\S]*?<\/table>/i.test(text)
-    && /<(?:th|td)\b[^>]*>[\s\S]*?(?:assignment|name|title)[\s\S]*?<\/(?:th|td)>/i.test(text);
+    && (/<(?:th|td)\b[^>]*>[\s\S]*?(?:assignment|name|title)[\s\S]*?<\/(?:th|td)>/i.test(text)
+      || /class=["'][^"']*student_assignment/i.test(text));
 }
 
 function htmlText(markup) {
@@ -158,10 +159,27 @@ function canvasScore(value) {
   return match ? { score: Number(match[1]), points: Number(match[2]) } : null;
 }
 
+function embeddedAssignmentGroups(source) {
+  const key = source.indexOf('"assignment_groups"');
+  if (key < 0) return [];
+  const start = source.indexOf('[', key);
+  if (start < 0) return [];
+  let depth = 0, quoted = false, escaped = false;
+  for (let i = start; i < source.length; i++) {
+    const ch = source[i];
+    if (quoted) { if (escaped) escaped = false; else if (ch === '\\') escaped = true; else if (ch === '"') quoted = false; continue; }
+    if (ch === '"') quoted = true;
+    else if (ch === '[') depth++;
+    else if (ch === ']' && --depth === 0) { try { return JSON.parse(source.slice(start, i + 1)); } catch { return []; } }
+  }
+  return [];
+}
+
 // Reads the static assignments table saved from Canvas. It never evaluates page scripts or makes requests.
 export function parseCanvasAssignmentsHtml(markup, options = {}) {
   const source = String(markup || '');
   const tables = [...source.matchAll(/<table\b([^>]*)>([\s\S]*?)<\/table>/gi)];
+  const embeddedGroups = embeddedAssignmentGroups(source);
   let parsed = null;
   for (const [, tableAttrs, tableHtml] of tables) {
     const rows = [...tableHtml.matchAll(/<tr\b([^>]*)>([\s\S]*?)<\/tr>/gi)];
@@ -182,11 +200,53 @@ export function parseCanvasAssignmentsHtml(markup, options = {}) {
       const name = cell.text.replace(/^(?:\s*\d+\s*)/, '').trim();
       if (!id || !name || /^(assignment|name|title)$/i.test(name)) continue;
       const pointsText = row.cells[pointsIndex]?.text || '';
-      const points = Number((pointsText.match(/-?\d+(?:\.\d+)?/) || [])[0]);
       const score = scoreIndex >= 0 ? canvasScore(row.cells[scoreIndex]?.text) : null;
-      assignments.push({ id, courseId, name, group: row.cells[groupIndex]?.text || 'Assignments', due: canvasDate(row.cells[dueIndex]?.text), points: Number.isFinite(points) ? points : null, score });
+      const points = Number((pointsText.match(/-?\d+(?:\.\d+)?/) || [])[0]);
+      const context = cell.body.match(/class=["'][^"']*context[^"']*["'][^>]*>([\s\S]*?)<\//i)?.[1];
+      const embedded = embeddedGroups.find(group => (group.assignments || []).some(item => String(item.id) === String(id)));
+      assignments.push({ id, courseId, name, group: row.cells[groupIndex]?.text || htmlText(context) || 'Assignments', groupId: embedded?.id, due: canvasDate(row.cells[dueIndex]?.text), points: Number.isFinite(points) ? points : score?.points ?? null, score });
     }
     if (assignments.length) { parsed = { assignments, courseId: assignments.find(a => a.courseId)?.courseId || '', title: '' }; break; }
+  }
+  // Canvas grades tables contain nested detail tables, which make a simple table
+  // scan stop at the first detail row. Read each top-level student row directly.
+  if (!parsed || parsed.assignments.length < 2) {
+    const rows = [...source.matchAll(/<tr\b([^>]*\bclass=["'][^"']*student_assignment[^"']*["'][^>]*)>([\s\S]*?)<\/tr>/gi)];
+    const assignments = [];
+    for (const [, attrs, body] of rows) {
+      const href = body.match(/href=["'][^"']*\/courses\/(\d+)\/assignments\/(\d+)/i);
+      const id = body.match(/class=["'][^"']*assignment_id[^"']*["'][^>]*>(\d+)/i)?.[1] || href?.[2];
+      const title = body.match(/<th\b[^>]*class=["'][^"']*title[^"']*["'][^>]*>([\s\S]*?)<\/th>/i)?.[1]
+        || body.match(/<a\b[^>]*href=["'][^"']*\/assignments\/\d+[^"']*["'][^>]*>([\s\S]*?)<\/a>/i)?.[1];
+      if (!id || !title) continue;
+      const scoreCell = body.match(/<td\b[^>]*class=["'][^"']*assignment_score[^"']*["'][^>]*>([\s\S]*?)<\/td>/i)?.[1] || '';
+      const dueCell = body.match(/<td\b[^>]*class=["'][^"']*due[^"']*["'][^>]*>([\s\S]*?)<\/td>/i)?.[1] || '';
+      const group = body.match(/class=["'][^"']*context[^"']*["'][^>]*>([\s\S]*?)<\//i)?.[1];
+      const score = canvasScore(scoreCell);
+      const metaGroup = embeddedGroups.find(g => (g.assignments || []).some(a => String(a.id) === String(id)));
+      const meta = metaGroup?.assignments?.find(a => String(a.id) === String(id));
+      assignments.push({ id, courseId: href?.[1], name: htmlText(title), group: htmlText(group) || 'Assignments',
+        groupId: metaGroup?.id, due: canvasDate(dueCell) || canvasDate(meta?.due_at),
+        points: score?.points ?? finiteNumber(meta?.points_possible), score });
+    }
+    if (assignments.length) parsed = { assignments, courseId: assignments.find(a => a.courseId)?.courseId || '', title: '' };
+  }
+  // The Assignments page sometimes has no summary table; its links and Canvas
+  // bootstrap assignment-group data still provide names, points, and due dates.
+  if (!parsed) {
+    const assignments = [];
+    const allMeta = embeddedGroups.flatMap(group => (group.assignments || []).map(item => ({ ...item, group })));
+    const seen = new Set();
+    for (const match of source.matchAll(/<a\b[^>]*href=["'][^"']*\/courses\/(\d+)\/assignments\/(\d+)[^"']*["'][^>]*>([\s\S]*?)<\/a>/gi)) {
+      const [, courseId, id, label] = match;
+      if (seen.has(id)) continue;
+      const name = htmlText(label); if (!name || /^(?:details|submit|edit)$/i.test(name)) continue;
+      seen.add(id);
+      const meta = allMeta.find(item => String(item.id) === id);
+      assignments.push({ id, courseId, name, group: meta?.group?.name || 'Assignments', groupId: meta?.group?.id,
+        due: canvasDate(meta?.due_at), points: finiteNumber(meta?.points_possible), score: null });
+    }
+    if (assignments.length) parsed = { assignments, courseId: assignments[0].courseId, title: '' };
   }
   if (!parsed) throw new Error('Could not find a Canvas assignments table. Save the course Assignments page as HTML and try that file.');
   const titleMatch = source.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
@@ -199,7 +259,18 @@ export function parseCanvasAssignmentsHtml(markup, options = {}) {
     if (!groups.has(groupName)) groups.set(groupName, []);
     groups.get(groupName).push({ id: item.id, name: item.name, points_possible: item.points, due_at: item.due, submission: item.score ? { score: item.score.score, workflow_state: 'graded' } : {} });
   }
-  const assignmentGroups = [...groups].map(([name, assignments], index) => ({ id: `saved-${index + 1}`, name, position: index + 1, assignments }));
-  const backup = canvasCourseToBackup({ id: courseId, name: courseName, apply_assignment_group_weights: false }, assignmentGroups, options.instanceUrl || '');
+  const assignmentGroups = [...groups].map(([name, assignments], index) => {
+    const assignmentIds = new Set(assignments.map(item => String(item.id)));
+    const embedded = embeddedGroups.find(group => (group.assignments || []).some(item => assignmentIds.has(String(item.id))));
+    return { id: embedded?.id || `saved-${index + 1}`, name, position: index + 1,
+      group_weight: finiteNumber(embedded?.group_weight) ?? 0, rules: embedded?.rules || {},
+      assignments: assignments.map(item => {
+        const metadata = embeddedGroups.flatMap(g => g.assignments || []).find(a => String(a.id) === String(item.id));
+        return { ...item, points_possible: item.points_possible ?? finiteNumber(metadata?.points_possible),
+          due_at: item.due_at ?? metadata?.due_at, omit_from_final_grade: metadata?.omit_from_final_grade };
+      }) };
+  });
+  const weighted = /"group_weighting_scheme"\s*:\s*"points"/i.test(source);
+  const backup = canvasCourseToBackup({ id: courseId, name: courseName, apply_assignment_group_weights: weighted }, assignmentGroups, options.instanceUrl || '');
   return { courseId: String(courseId), courseName, backup, gradedCount: backup.tasks.filter(task => task.earned_points !== null).length };
 }

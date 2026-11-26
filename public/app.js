@@ -1786,7 +1786,7 @@ function previewTaskImport() {
           pendingImport = { type: 'canvas_html', data: parsed.backup, count: parsed.backup.tasks.length, skipped: 0, mergePreview };
           document.getElementById('taskImportUpdateMatchesGroup').hidden = false;
           const graded = parsed.gradedCount;
-          preview.textContent = `Canvas saved page: ${parsed.backup.tasks.length} assignments, ${graded} graded. Review and import; assignment groups and any scores visible on the saved page are included.`;
+          preview.textContent = `Canvas Grades page: ${parsed.backup.tasks.length} assignments, ${graded} graded. Review and import; available assignment categories, group weights, and scores are included.`;
         } else {
         const courseNameField = document.getElementById('taskImportCourseName');
         const parsed = parseLearningSuiteHtml(content, courseNameField.value);

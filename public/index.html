@@ -684,7 +684,7 @@
         </section>
         <section class="transfer-panel">
           <h3>Import tasks</h3>
-          <p class="form-hint">Import CSV, JSON, or a saved BYU Learning Suite or Canvas Assignments page.</p>
+          <p class="form-hint">Import CSV, JSON, or a saved BYU Learning Suite or Canvas Grades page.</p>
           <div class="form-row">
             <div class="form-group">
               <label for="taskImportFormat">Source format</label>
@@ -695,7 +695,7 @@
                 <option value="monday">monday.com CSV</option>
                 <option value="clickup">ClickUp CSV</option>
                 <option value="learning_suite_html">BYU Learning Suite saved page (HTML)</option>
-                <option value="canvas_html">Canvas saved Assignments page (HTML)</option>
+                <option value="canvas_html">Canvas saved Grades page (HTML)</option>
               </select>
             </div>
             <div class="form-group" id="taskImportFileGroup">
@@ -716,9 +716,9 @@
             the raw HTML page.
           </p>
           <p class="form-hint" id="canvasHtmlImportInstructions" hidden>
-            In Canvas, open the course <strong>Assignments</strong> page, use your browser’s Save Page command, and
-            select the saved HTML file here. MyPlan reads the file locally; scores are included only if they appear in
-            the saved table.
+            In Canvas, open the course <strong>Grades</strong> page, save it as HTML, and select the file here. The
+            Grades page includes assignment scores, categories, and available group weighting information. MyPlan
+            reads the saved file locally.
           </p>
           <label class="form-hint transfer-import-option" id="taskImportUpdateMatchesGroup" hidden>
             <input type="checkbox" id="taskImportUpdateMatches" checked>
